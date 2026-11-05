@@ -104,6 +104,34 @@ def secret(name):
         return None
 
 
+RENDER_PROBE = """
+import torch
+torch.zeros(1, device="cuda" if torch.cuda.is_available() else "cpu")   # CUDA first, as in the training
+import mujoco
+m = mujoco.MjModel.from_xml_string('<mujoco><worldbody><light pos="0 0 3"/><geom size=".1"/></worldbody></mujoco>')
+r = mujoco.Renderer(m, height=480, width=640)
+r.update_scene(mujoco.MjData(m))
+img = r.render()
+print("render ok", img.shape)
+"""
+
+
+def render_backend(py):
+    """The MuJoCo GL backend that renders here, tried in a CHILD process: EGL crashed the training process with
+    SIGSEGV inside mujoco.Renderer on Kaggle (getup-mb-v1, -v1b), and a segfault cannot be caught in-process.
+    EGL, else OSMesa (software), else None (train without videos)."""
+    for gl in ("egl", "osmesa"):
+        if gl == "osmesa":
+            run(["bash", "-c", "apt-get install -y -qq libosmesa6 > /dev/null 2>&1 || true"], "install.log",
+                check=False)
+        code = run([py, "-c", RENDER_PROBE], "render.log", env={"MUJOCO_GL": gl, "PYOPENGL_PLATFORM": gl},
+                   check=False)
+        log(f"render probe {gl}: {'ok' if code == 0 else f'failed (exit {code})'}")
+        if code == 0:
+            return gl
+    return None
+
+
 def reachable(host):
     try:
         socket.create_connection((host, 443), timeout=5).close()
@@ -159,9 +187,15 @@ def main():
         raise SystemExit("setup or GPU tests failed (logs/setup.log): not training on a plant that disagrees with "
                          "its reference")
 
+    # videos only with a GL backend that rendered in a child process (else the training runs without videos)
+    gl = render_backend(py)
+    if gl is None:
+        log("no working GL backend: training WITHOUT videos")
+        video_every, video_every_min = 0, 0.0
+
     # training on the fitted model
     env = {"WANDB_API_KEY": wandb_key, "WANDB_ENTITY": WANDB_ENTITY, "WANDB_USERNAME": WANDB_ENTITY,
-           "MUJOCO_GL": "egl", "PYOPENGL_PLATFORM": "egl", "PYTHONUNBUFFERED": "1",
+           "MUJOCO_GL": gl or "egl", "PYOPENGL_PLATFORM": gl or "egl", "PYTHONUNBUFFERED": "1",
            "PH_K1_ROOT": str(SRC / "external" / "full-body"),
            "PYTHONFAULTHANDLER": "1"}  # a crash in native code (SIGSEGV) prints the Python stack into train.log
     budget = SESSION_HOURS * 60 - (time.time() - KERNEL_START) / 60 - MARGIN_MINUTES
