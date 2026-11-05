@@ -162,7 +162,8 @@ def main():
     # training on the fitted model
     env = {"WANDB_API_KEY": wandb_key, "WANDB_ENTITY": WANDB_ENTITY, "WANDB_USERNAME": WANDB_ENTITY,
            "MUJOCO_GL": "egl", "PYOPENGL_PLATFORM": "egl", "PYTHONUNBUFFERED": "1",
-           "PH_K1_ROOT": str(SRC / "external" / "full-body")}
+           "PH_K1_ROOT": str(SRC / "external" / "full-body"),
+           "PYTHONFAULTHANDLER": "1"}  # a crash in native code (SIGSEGV) prints the Python stack into train.log
     budget = SESSION_HOURS * 60 - (time.time() - KERNEL_START) / 60 - MARGIN_MINUTES
     if HOURS > 0:
         budget = min(budget, HOURS * 60)
