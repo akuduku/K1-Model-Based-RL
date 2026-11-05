@@ -54,7 +54,7 @@ for pair in pairs:
 (stage / code_file).write_text(script)
 (stage / "kernel-metadata.json").write_text(json.dumps(meta, indent=2) + "\n")
 PY
-timeout=${TIMEOUT:-$DEFAULT_TIMEOUT}   # 12 h (Kaggle's session cap)
+timeout=${TIMEOUT:-$DEFAULT_TIMEOUT}   # 11 h: under Kaggle's 12 h cap; the training itself stops 30 min earlier
 if [ -n "${DRY_RUN:-}" ]; then diff "$KIT_DIR/$SCRIPT" "$STAGE/$SCRIPT" || true; cat "$STAGE/kernel-metadata.json"; exit; fi
 "$KAGGLE" kernels push -p "$STAGE" --accelerator NvidiaTeslaT4 -t "$timeout"
 echo "pushed https://www.kaggle.com/code/$KERNEL (timeout ${timeout}s); fetch with TASK=$TASK kaggle/fetch.sh"

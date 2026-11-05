@@ -107,6 +107,13 @@ Please record the agent and gain set of every run (they go into `mbrl/data.py KN
 4. **More get-ups**, front and back, ~10 each.
 5. **After every new policy of ours:** its own log, which goes back into the fit (the data loop).
 
+## Open
+
+- **Get-up A/B baseline.** The first get-up run on the fitted model (`getup-mb-v1`) also has the new reward
+  curriculum (Full Body b5d0c8a: no movement costs and fixed gains until it stands up). To separate the effect of
+  the fit from that of the reward fix, the same training on today's plant is needed (`getup-ph-v2`), compared on
+  success rate, time to stand, battery energy per get-up and the MuJoCo check.
+
 ## Limits
 
 - The trunk position and linear velocity are not measured. They come from leg kinematics with the lowest contact

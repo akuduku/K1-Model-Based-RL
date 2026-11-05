@@ -46,8 +46,9 @@ WANDB_ENTITY = "karl-jahnel-universit-t-leipzig"
 WANDB_PROJECT = "Akos pH MBRL"
 TRAIN_ARGS = ""                           # extra arguments for Full Body's rl/<task>/train.py
 RESUME = ""                               # W&B run (name or id) in WANDB_PROJECT to continue from; "" = fresh
-SESSION_HOURS = 12.0                      # Kaggle's session cap
-MARGIN_MINUTES = 20                       # kept free after the training for the final save and upload
+SESSION_HOURS = 11.0                      # our own cap, 1 h under Kaggle's 12 h (kaggle/run.sh pushes with the same
+                                          # timeout): the kernel never runs into Kaggle's limit
+MARGIN_MINUTES = 30                       # kept free after the training: final checkpoint, deploy.bin, W&B artifact
 
 TASK_DEFAULTS = {"stand": {"iterations": 3000, "video_every": 500, "video_every_min": 0.0},
                  "getup": {"iterations": 100000, "video_every": 0, "video_every_min": 30.0}}

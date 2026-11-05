@@ -8,7 +8,7 @@ KAGGLE_USER=${KAGGLE_USER:-$("$KAGGLE" config view | sed -n 's/^- username: //p'
 # TASK=stand (default) / getup: train that skill on the fitted model; one kernel per task
 TASK=${TASK:-stand}
 case "$TASK" in
-    stand|getup) SCRIPT=train_mb.py; DEFAULT_SLUG=mbrl-k1-$TASK; DEFAULT_TIMEOUT=43200 ;;   # Kaggle's 12 h cap
+    stand|getup) SCRIPT=train_mb.py; DEFAULT_SLUG=mbrl-k1-$TASK; DEFAULT_TIMEOUT=39600 ;;   # 11 h = SESSION_HOURS
     *) echo "TASK=$TASK: use stand or getup" >&2; exit 1 ;;
 esac
 KERNEL_SLUG=${KERNEL_SLUG:-$DEFAULT_SLUG}
