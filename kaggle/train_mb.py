@@ -40,6 +40,7 @@ ITERATIONS = 0                            # 0 = task default (stand 3000 as stan
 HOURS = 0.0                               # 0 = the whole session; else at most this much training
 VIDEO_EVERY = -1                          # iterations; -1 = task default (stand 500, getup 0 = by time)
 VIDEO_EVERY_MIN = -1.0                    # minutes; -1 = task default (stand 0, getup 30)
+FIRST_VIDEO_MIN = 3.0                     # the first of the timed videos after 3 min: it proves the video path
 SAVE_EVERY = 250
 SAVE_EVERY_MIN = 10.0                     # a checkpoint every 10 min of training, so a kill loses little
 WANDB_ENTITY = "karl-jahnel-universit-t-leipzig"
@@ -117,9 +118,9 @@ print("render ok", img.shape)
 
 
 def render_backend(py):
-    """The MuJoCo GL backend that renders here, tried in a CHILD process: EGL crashed the training process with
-    SIGSEGV inside mujoco.Renderer on Kaggle (getup-mb-v1, -v1b), and a segfault cannot be caught in-process.
-    EGL, else OSMesa (software), else None (train without videos)."""
+    """The MuJoCo GL backend for the video process (ph_k1/render_frames.py inherits it), tried in a child process:
+    EGL, else OSMesa (software), else None (train without videos).  EGL renders in a fresh process on Kaggle but
+    crashed with SIGSEGV inside the training process (getup-mb-v1, -v1b, -v1c), so the training never touches GL."""
     for gl in ("egl", "osmesa"):
         if gl == "osmesa":
             run(["bash", "-c", "apt-get install -y -qq libosmesa6 > /dev/null 2>&1 || true"], "install.log",
@@ -206,6 +207,7 @@ def main():
            "--", "--run-name", run_name, "--num-envs", NUM_ENVS, "--iterations", iterations,
            "--save-every", SAVE_EVERY, "--save-every-min", SAVE_EVERY_MIN,
            "--video-every", video_every, "--video-every-min", video_every_min,
+           *(["--first-video-min", FIRST_VIDEO_MIN] if video_every_min > 0 else []),
            "--wandb-project", WANDB_PROJECT, "--wandb-entity", WANDB_ENTITY, "--log-root", WORK / "runs",
            "--max-minutes", f"{max(budget, 1):.1f}", *(["--resume-wandb", RESUME] if RESUME else []),
            *TRAIN_ARGS.split()]
