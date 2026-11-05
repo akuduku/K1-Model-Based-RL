@@ -1,0 +1,5 @@
+# the pH plant's packages (torch, mujoco, rsl-rl-lib, tensordict, wandb, ...)
+-r external/full-body/requirements.txt
+numpy
+matplotlib
+pytest

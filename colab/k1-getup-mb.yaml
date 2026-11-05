@@ -1,0 +1,62 @@
+# K1 get-up + stay, trained on the FITTED pH plant (parameter ensemble from the robot logs), free Colab T4, by time.
+#
+# The same training as Full Body's rl/getup (same env, rewards, harness, deploy.bin), but every robot of the batch
+# draws one member of the fitted parameter ensemble (fits/getup-both-v1.json: CEM elites of the system
+# identification on the two real get-up logs) at every reset: contact, joint damping, torque ceilings, driver
+# gains, delay.  Compare with the run on today's plant (Full Body: stand-ph-v1 / getup-ph-v1).
+#
+# One session: setup (Full Body's CUDA build + GPU tests, this repo's tests, ~10 min), then training for 6.75 h
+# with a clean stop; a checkpoint every 10 min.  Next session: Run all again (resumes the W&B run).
+#
+#   colab-train validate colab/k1-getup-mb.yaml
+#   colab-train launch --browser colab/k1-getup-mb.yaml
+# Colab Secrets (key icon, Notebook access ON): GITHUB_TOKEN (read access to BOTH private repos: this one and
+# K1-Full-Body-pH, the submodule), WANDB_API_KEY.
+name: k1-getup-mb
+description: K1 get-up + stay, trained on the FITTED pH plant (parameter ensemble from the robot logs), free Colab T4, by time.
+repo:
+  url: https://github.com/akuduku/K1-Model-Based-RL.git
+  branch: main
+  token_secret: GITHUB_TOKEN
+  token_user: x-access-token
+  submodules: true                 # external/full-body = the pH plant
+python: null
+install:
+  - bash colab/setup_gpu.sh
+mujoco_gl: true
+env:
+  PYTHONUNBUFFERED: "1"
+  TORCH_CUDA_ARCH_LIST: "7.5+PTX"
+wandb:
+  mode: online
+  entity: karl-jahnel-universit-t-leipzig
+  project: Akos pH MBRL
+  api_key_secret: WANDB_API_KEY
+  iteration_key: _step
+run:
+  prefix: getup-mb
+  name: v1
+train:
+  task: getup
+  num_envs: 4096
+  max_iters: 100000                # an upper bound only: the time budget ends each session
+  save_every: 250
+  command: "python -m mbrl.train getup --fit fits/getup-both-v1.json -- --run-name {run_id} --num-envs {num_envs} --iterations {iters} --hours 6.75 --save-every-min 10 --video-every-min 30 --wandb-project \"{wandb_project}\" --wandb-entity {wandb_entity} --log-root logs{resume_args}"
+progress:
+  regex: 'Learning iteration (?P<iter>\d+)/(?P<total>\d+)'
+video:
+  every: 0                         # the trainer makes its own videos
+resume:
+  source: wandb
+  checkpoint_glob: "logs/**/model_*.pt"
+  checkpoint_regex: 'model_(\d+)\.pt'
+  restore_dir: "logs/{run_id}/resume"
+  wandb_config_shim: true
+  iters_mode: total
+  args: " --resume {resume_path}"
+outputs: ["logs/**/deploy_*.bin"]
+limits:
+  max_hours: 7
+runtime:
+  accelerator: GPU
+  gpu_type: T4
