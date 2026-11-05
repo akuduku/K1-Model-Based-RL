@@ -34,7 +34,9 @@ mbrl/
   train.py      Full Body's rl/<task>/train.py on the fitted model (same harness, W&B, deploy.bin)
 tests/          parameter rows, data, replay self-consistency, ensemble/residual attach, env wrapper
 fits/           fitted models (JSON), residual/  residual ensembles (.pt)
-colab/          colab-train jobs: k1-stand-mb.yaml, k1-getup-mb.yaml (+ setup_gpu.sh)
+kaggle/         Kaggle kernel train_mb.py (TASK=stand|getup kaggle/run.sh, fetch.sh); the GITHUB_TOKEN in the
+                private dataset <user>/k1-secrets needs read access to this repo AND K1-Full-Body-pH
+colab/          colab-train jobs: k1-stand-mb.yaml, k1-getup-mb.yaml (+ setup_gpu.sh, also used by Kaggle)
 ```
 
 The plant feature this needs lives in Full Body: `plant.robot_params` (B, 49), one row of physical parameters
@@ -51,7 +53,9 @@ python -m mbrl.report fits/getup-both-v1.json                              # out
 python -m mbrl.residual --fit fits/getup-both-v1.json --train getup_2236,getup_front_2250 --val "" \
        --out residual/getup-both-v1.pt
 python -m mbrl.train stand --fit fits/getup-both-v1.json -- --device cpu --num-envs 8 --iterations 2 --no-wandb  # smoke
-colab-train launch --browser colab/k1-stand-mb.yaml                        # the real training (Colab T4)
+TASK=stand kaggle/run.sh                                                   # the real training (Kaggle T4, 12 h session)
+TASK=stand kaggle/fetch.sh                                                 # wait, download the kernel output
+colab-train launch --browser colab/k1-stand-mb.yaml                        # or on Colab
 ```
 
 The logs are not in git: `MBRL_LOGS` points to the folder that holds `30102026/...` (default:
