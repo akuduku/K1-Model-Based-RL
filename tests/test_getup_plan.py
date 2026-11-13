@@ -81,6 +81,24 @@ def test_planner_search_and_plan_file(tmp_path):
     assert p["kind"] == "prone" and p["keyframes"].shape == (2, 22) and p["durations"].shape == (3,)
 
 
+def test_assist_schedule_and_init_plan(tmp_path):
+    from mbrl.getup.plan import PlanConfig, Planner, save_plan
+    cfg = PlanConfig(kind="prone", restarts=2, candidates=2, variants=1, keyframes=2, horizon_s=0.1, iterations=4,
+                     library_size=8, device="cpu", seed=6, assist=100.0, assist_until=0.5)
+    pl = Planner(cfg, log=lambda *a: None)
+    st = pl.search()
+    assists = [row["assist_N"] for row in st["history"]]
+    assert assists[0] == 100.0 and assists[1] == 50.0 and assists[2] == 0.0 and assists[3] == 0.0
+    path = save_plan(pl.final(st), st, cfg, tmp_path, "a", None)
+    cfg2 = PlanConfig(**{**cfg.__dict__, "iterations": 1, "init_plan": str(path)})
+    pl2 = Planner(cfg2, log=lambda *a: None)
+    st2 = pl2.search()
+    prev = torch.load(path, weights_only=False)
+    assert st2["history"][0]["it"] == 0
+    assert torch.allclose(pl2.kf.decode(torch.tensor(prev["z"])[None].float())[0],
+                          pl.kf.decode(torch.tensor(prev["z"])[None].float())[0])
+
+
 def _plan_files(tmp_path):
     """Two tiny plans (supine, prone) made by the planner."""
     from mbrl.getup.plan import PlanConfig, Planner, save_plan

@@ -77,6 +77,13 @@ class PlanConfig:
     assist_step: float = 25.0
     gate: float = 0.75            # elites standing in this share of the variants -> less assist / more energy weight
     energy_step: float = 0.1
+    # the assist is also taken away on a schedule: at most assist x (1 - f / assist_until), f = share of the time
+    # budget (or of the iterations) used, so the last 1 - assist_until of the search optimises without any help
+    # (getup-mbrl-v1: by the success rule alone the back start still had the full 100 N after 20 of ~38 iterations)
+    assist_until: float = 0.6     # 0: success rule only
+    init_plan: str = ""           # start every search around the z of this plan file (a previous run) instead of HOME
+    init_spread: float = 0.3      # logit units around init_plan, per search (search 0 starts exactly on it)
+    init_std_scale: float = 0.5   # x the initial std when starting from init_plan
     delay_ms: tuple = (10.0, 40.0)
     gain_dr: float = 0.10
     self_collision: bool = True
@@ -241,19 +248,33 @@ class Planner:
         n_el = max(2, int(round(cfg.elite_frac * N)))
         g = torch.Generator().manual_seed(cfg.seed + 7)
         if state is None:
-            base = self.kf.init_mean().cpu().double()
-            mean = base.expand(R, D).clone()
-            mean[1:] += 0.5 * torch.randn(R - 1, D, generator=g, dtype=torch.float64)  # different starts per search
             std = self.kf.init_std(cfg.init_joint_std, cfg.init_dur_std).cpu().double().expand(R, D).clone()
+            if cfg.init_plan:
+                prev = torch.load(cfg.init_plan, map_location="cpu", weights_only=False)
+                if len(prev["z"]) != D:
+                    raise ValueError(f"{cfg.init_plan}: {len(prev['z'])} parameters, this planner has {D}")
+                base, spread = torch.tensor(prev["z"], dtype=torch.float64), cfg.init_spread
+                std = std * cfg.init_std_scale
+                self.log(f"[plan] {cfg.kind}: searches start around {cfg.init_plan} (it stood in "
+                         f"{prev.get('success', float('nan')):.2f} of its variants)")
+            else:
+                base, spread = self.kf.init_mean().cpu().double(), 0.5
+            mean = base.expand(R, D).clone()
+            mean[1:] += spread * torch.randn(R - 1, D, generator=g, dtype=torch.float64)  # different starts per search
             state = {"mean": mean, "std": std, "it": 0, "history": [], "assist": self.assist, "energy": 0.0}
         mean, std = state["mean"], state["std"]
         self.assist, self.energy = state["assist"], state["energy"]
         t_start = time.time()
         last_video = t_start
+        it_start = state["it"]
         while state["it"] < cfg.iterations:
-            if cfg.minutes > 0 and (time.time() - t_start) / 60 > cfg.minutes:
+            used = (time.time() - t_start) / 60
+            if cfg.minutes > 0 and used > cfg.minutes:
                 self.log(f"[plan] {cfg.kind}: time budget of {cfg.minutes:g} min used up")
                 break
+            if cfg.assist_until > 0:  # the schedule: no help at all in the last part of the search
+                f = used / cfg.minutes if cfg.minutes > 0 else (state["it"] - it_start) / max(1, cfg.iterations - it_start)
+                self.assist = min(self.assist, cfg.assist * max(0.0, 1.0 - f / cfg.assist_until))
             t0 = time.time()
             eps = torch.randn(R, N, D, generator=g, dtype=torch.float64)
             eps[:, 0] = 0.0
@@ -392,6 +413,8 @@ def main(argv=None):
     out_dir = Path(a.out)
     for kind in [k.strip() for k in a.kinds.split(",") if k.strip()]:
         cfg = PlanConfig(kind=kind, **base)  # --minutes: the time budget per kind
+        if "{kind}" in cfg.init_plan:  # --init-plan plans/getup-{kind}-v1.pt: one previous plan per kind
+            cfg.init_plan = cfg.init_plan.format(kind=kind)
         t0 = time.time()
         pl = Planner(cfg, fit)
         if a.video:

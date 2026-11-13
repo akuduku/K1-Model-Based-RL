@@ -55,6 +55,10 @@ WANDB_PROJECT = "Akos pH MBRL"
 TRAIN_ARGS = ""                           # extra arguments for Full Body's rl/<task>/train.py (or the getup-* scripts)
 PLAN_KINDS = "supine,prone"               # getup-plan: one plan per lying kind
 PLAN_HOURS = 2.5                          # getup-mbrl: the planning part; the tracking gets the rest of the session
+PLAN_INIT = ""                            # getup-plan/-mbrl: start the searches around these plans, e.g.
+                                          # "plans/getup-{kind}-v1.pt" (committed from a previous run)
+FORCE_TRACK = False                       # getup-mbrl: track also plans that miss the gate (default: only those that
+                                          # stand without assist in >= 75 % of the variants; none -> no tracking)
 PLAN_TAG = "v1"                           # getup-plan: plans/getup-<kind>-<tag>.pt
 PLAN_ITERATIONS = 200                     # getup-plan: upper bound; the time budget usually ends each search first
 PLANS = "plans/getup-supine-v1.pt,plans/getup-prone-v1.pt"   # getup-track: the plans (committed in this repo)
@@ -235,10 +239,11 @@ def main():
         return [py, "-m", "mbrl.getup.plan", "--kinds", PLAN_KINDS, "--tag", PLAN_TAG, "--minutes", f"{per_kind:.1f}",
                 "--iterations", PLAN_ITERATIONS, "--out", WORK / "plans", "--run-name", name, "--video",
                 "--wandb-project", WANDB_PROJECT, "--wandb-entity", WANDB_ENTITY, *(["--fit", FIT] if FIT else []),
-                *TRAIN_ARGS.split()]
+                *(["--init-plan", PLAN_INIT] if PLAN_INIT else []), *TRAIN_ARGS.split()]
 
-    def track_cmd(name, minutes, plans):
+    def track_cmd(name, minutes, plans, kinds=None):
         return [py, "-m", "mbrl.getup.train", "--plans", plans, "--dagger-iters", DAGGER_ITERS,
+                *(["--lying-kinds", kinds] if kinds else []),
                 *(["--fit", FIT] if FIT else []), *harness(name, minutes), *TRAIN_ARGS.split()]
 
     def go(cmd, what):
@@ -255,19 +260,27 @@ def main():
     elif TASK == "getup-mbrl":
         # 1. plan with the model, 2. learn to track the fresh plans with the time that is left (two W&B runs)
         go(plan_cmd(f"{run_name}-plan", min(PLAN_HOURS * 60, budget - 60)), "planning")
-        plans = []
+        plans, kinds = [], []
         for kind in [k.strip() for k in PLAN_KINDS.split(",") if k.strip()]:
             p = WORK / "plans" / f"getup-{kind}-{PLAN_TAG}.pt"
             meta = json.loads(p.with_suffix(".json").read_text())
-            gate = "PASS" if meta["success"] >= 0.75 else "below the gate"
-            log(f"plan {kind}: stands without assist in {meta['success']:.2f} of the variants ({gate}; nominal "
-                f"{meta['success_nominal']:.2f}, fitted {meta['success_fitted']})")
-            plans.append(str(p))
+            ok = meta["success"] >= 0.75
+            log(f"plan {kind}: stands without assist in {meta['success']:.2f} of the variants "
+                f"({'PASS' if ok else 'below the gate'}; nominal {meta['success_nominal']:.2f}, "
+                f"fitted {meta['success_fitted']})")
+            if ok or FORCE_TRACK:
+                plans.append(str(p))
+                kinds.append(kind)
+        if not plans:  # tracking a plan that falls teaches falling: keep the GPU quota for the next planning run
+            log("no plan passed the gate: no tracking (FORCE_TRACK=1 to track anyway); plans are in plans/ of the "
+                "output: commit them and continue with TASK=getup-plan PLAN_INIT=plans/getup-{kind}-<tag>.pt")
+            log("done")
+            return
         left = SESSION_HOURS * 60 - (time.time() - KERNEL_START) / 60 - MARGIN_MINUTES
         if HOURS > 0:
             left = min(left, HOURS * 60 - (time.time() - KERNEL_START) / 60)
-        log(f"tracking: {left:.0f} min left")
-        go(track_cmd(f"{run_name}-track", left, ",".join(plans)), "training")
+        log(f"tracking {kinds}: {left:.0f} min left")
+        go(track_cmd(f"{run_name}-track", left, ",".join(plans), ",".join(kinds)), "training")
     else:
         go([py, "-m", "mbrl.train", TASK, "--fit", FIT, "--mode", MODE,
             *(["--residual", RESIDUAL] if RESIDUAL else []), "--", *harness(run_name, budget), *TRAIN_ARGS.split()],
