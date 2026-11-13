@@ -113,7 +113,7 @@ def dagger_warm_start(env: TrackEnv, iters: int, *, beta0: float = 1.0, decay: f
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    H.add_arguments(ap, run_prefix="getup-track", wandb_project="Akos pH MBRL", iterations=100000, save_every=0,
+    H.add_arguments(ap, run_prefix="getup-track", wandb_project="Akos pH GetUp MBRL", iterations=100000, save_every=0,
                     video_every=0, save_every_min=10.0, video_every_min=30.0, init_std=0.5, entropy_coef=0.005,
                     eval_every_min=30.0, first_eval_min=3.0)
     ap.add_argument("--plans", required=True, help="comma list of plan .pt files (mbrl.getup.plan), one per kind")

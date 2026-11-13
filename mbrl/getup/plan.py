@@ -382,7 +382,7 @@ def main(argv=None):
     ap.add_argument("--video-every-min", type=float, default=15.0,
                     help="with --video: also film the best search's current mean plan every N minutes (0: off)")
     ap.add_argument("--no-wandb", action="store_true")
-    ap.add_argument("--wandb-project", default="Akos pH MBRL")
+    ap.add_argument("--wandb-project", default="Akos pH GetUp MBRL")
     ap.add_argument("--wandb-entity", default=os.environ.get("WANDB_ENTITY", "karl-jahnel-universit-t-leipzig"))
     ap.add_argument("--smoke", action="store_true", help="tiny CPU run: 2 searches x 4 candidates x 2 variants, 1 s")
     for f, default in asdict(PlanConfig()).items():
