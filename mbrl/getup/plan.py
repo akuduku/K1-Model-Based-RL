@@ -204,6 +204,37 @@ class Planner:
         return out
 
     # ------------------------------------------------------------------ CEM
+    def _recorder(self, slot: int):
+        try:
+            from ph_k1.video import VideoRecorder
+            return VideoRecorder(self.env.plant, b=slot, fps=1.0 / self.env.cfg.policy_dt)
+        except Exception as exc:  # noqa: BLE001
+            self.log(f"[plan] no video: {type(exc).__name__}: {exc}")
+            return None
+
+    def _save_video(self, rec, path: Path, wandb_run=None, key: str = "video"):
+        if rec is None:
+            return None
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            out = rec.save(path)
+            rec.close()
+        except Exception as exc:  # noqa: BLE001  (no GL backend / MP4 writer: plan on without videos)
+            self.log(f"[plan] video failed: {type(exc).__name__}: {exc}")
+            self.video_every_min = 0.0
+            return None
+        if wandb_run is not None and out:
+            try:
+                import wandb
+                wandb_run.log({key: wandb.Video(str(out), format="mp4")})
+            except Exception as exc:  # noqa: BLE001
+                self.log(f"[plan] video upload failed: {type(exc).__name__}: {exc}")
+        self.log(f"[plan] video {Path(out).name}")
+        return out
+
+    video_every_min = 0.0   # set by main(): a video of the best search's mean plan every N minutes of search
+    video_dir: Path | None = None
+
     def search(self, state: dict | None = None, wandb_run=None) -> dict:
         cfg = self.cfg
         R, N, V, D = cfg.restarts, cfg.candidates, cfg.variants, self.kf.D
@@ -218,6 +249,7 @@ class Planner:
         mean, std = state["mean"], state["std"]
         self.assist, self.energy = state["assist"], state["energy"]
         t_start = time.time()
+        last_video = t_start
         while state["it"] < cfg.iterations:
             if cfg.minutes > 0 and (time.time() - t_start) / 60 > cfg.minutes:
                 self.log(f"[plan] {cfg.kind}: time budget of {cfg.minutes:g} min used up")
@@ -226,7 +258,19 @@ class Planner:
             eps = torch.randn(R, N, D, generator=g, dtype=torch.float64)
             eps[:, 0] = 0.0
             z = mean[:, None] + std[:, None] * eps                                   # (R, N, D)
-            out = self.rollout(z[:, :, None].expand(R, N, V, D).reshape(-1, D).float())
+            # every video_every_min minutes: film the mean plan of the search that did best last time (variant 0)
+            rec = None
+            film = (self.video_every_min > 0 and self.video_dir is not None
+                    and ((time.time() - last_video) / 60 >= self.video_every_min or state["it"] == 0))
+            if film:
+                prev = state["history"][-1]["elite_success"] if state["history"] else [0.0]
+                top = int(torch.tensor(prev).argmax())
+                rec = self._recorder((top * N) * V)
+            out = self.rollout(z[:, :, None].expand(R, N, V, D).reshape(-1, D).float(), video=rec)
+            if film:
+                self._save_video(rec, self.video_dir / f"{cfg.kind}_it{state['it']:04d}.mp4", wandb_run,
+                                 f"{cfg.kind}/video_search")
+                last_video = time.time()
             c = out["cost"].double().reshape(R, N, V)
             fin = (out["final"] >= 0.8).double().reshape(R, N, V)
             cost = c.mean(-1) + cfg.risk * c.std(-1, unbiased=False)
@@ -274,21 +318,9 @@ class Planner:
         best = int(cost.argmin())
         # the reference: the best plan on variant 0 (nominal parameters), recorded
         slot = (best * N) * V + 0
-        video = None
-        if video_path is not None:
-            try:
-                from ph_k1.video import VideoRecorder
-                video = VideoRecorder(self.env.plant, b=slot, fps=1.0 / self.env.cfg.policy_dt)
-            except Exception as exc:  # noqa: BLE001
-                self.log(f"[plan] no video: {type(exc).__name__}: {exc}")
+        video = self._recorder(slot) if video_path is not None else None
         ref = self.rollout(z, record=slot, video=video)
-        vid = None
-        if video is not None:
-            try:
-                vid = video.save(video_path)
-                video.close()
-            except Exception as exc:  # noqa: BLE001
-                self.log(f"[plan] video failed: {type(exc).__name__}: {exc}")
+        vid = self._save_video(video, video_path) if video is not None else None
         kf, dur = self.kf.decode(state["mean"][best:best + 1].float().to(self.dev))
         b = slice(best * N * V, best * N * V + V, 1)
         tts = ref["time_to_stand"][b]
@@ -325,7 +357,9 @@ def main(argv=None):
     ap.add_argument("--out", default=str(PLANS))
     ap.add_argument("--tag", default="v1")
     ap.add_argument("--run-name", default=time.strftime("getup-plan-%Y%m%d-%H%M"))
-    ap.add_argument("--video", action="store_true")
+    ap.add_argument("--video", action="store_true", help="a video of every final plan (and of the search, see below)")
+    ap.add_argument("--video-every-min", type=float, default=15.0,
+                    help="with --video: also film the best search's current mean plan every N minutes (0: off)")
     ap.add_argument("--no-wandb", action="store_true")
     ap.add_argument("--wandb-project", default="Akos pH MBRL")
     ap.add_argument("--wandb-entity", default=os.environ.get("WANDB_ENTITY", "karl-jahnel-universit-t-leipzig"))
@@ -360,6 +394,8 @@ def main(argv=None):
         cfg = PlanConfig(kind=kind, **base)  # --minutes: the time budget per kind
         t0 = time.time()
         pl = Planner(cfg, fit)
+        if a.video:
+            pl.video_every_min, pl.video_dir = a.video_every_min, out_dir / "videos"
         print(f"[plan] {kind}: {pl.B} robots ({cfg.restarts} searches x {cfg.candidates} candidates x "
               f"{cfg.variants} variants) on {cfg.device}, {pl.kf.D} parameters, {pl.steps} steps per rollout", flush=True)
         state_file = out_dir / f"getup-{kind}-{a.tag}-state.pt"
@@ -381,7 +417,7 @@ def main(argv=None):
             run.summary[f"{kind}/success_nominal"] = result["success_nominal"]
             if result["video"]:
                 import wandb
-                run.log({f"{kind}/video": wandb.Video(result["video"], format="mp4")})
+                run.log({f"{kind}/video_final": wandb.Video(result["video"], format="mp4")})
             run.save(str(path), base_path=str(out_dir))
             run.save(str(path.with_suffix(".json")), base_path=str(out_dir))
         del pl
