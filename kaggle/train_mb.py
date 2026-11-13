@@ -16,6 +16,12 @@ kaggle/run.sh overrides the settings below:
     TASK=stand kaggle/run.sh                                  # stand-mb-v1, 3000 iterations (as stand-ph-v1)
     TASK=getup kaggle/run.sh                                  # getup-mb-v1, by time
     TASK=getup kaggle/run.sh RUN_NAME=getup-mb-v1b RESUME=getup-mb-v1
+    TASK=getup-plan kaggle/run.sh HOURS=2.5                   # the model-based planner -> plans/ in the output
+    TASK=getup-track kaggle/run.sh HOURS=6                    # DAgger + PPO on the committed plans (PLANS)
+
+getup-plan runs `python -m mbrl.getup.plan` (CEM over keyframe motions in the pH plant; FIT gives half of the variants
+fitted parameters), the time budget split over the PLAN_KINDS; its plans land in plans/ of the kernel output (commit
+them to plans/ of this repo for getup-track).  getup-track runs `python -m mbrl.getup.train --plans PLANS`.
 """
 
 import json
@@ -29,7 +35,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-TASK = "stand"                            # stand | getup
+TASK = "stand"                            # stand | getup | getup-plan | getup-track
 BRANCH = "main"                           # git branch of akuduku/K1-Model-Based-RL
 RUN_NAME = ""                             # "" = <TASK>-mb-v1
 FIT = "fits/getup-both-v1.json"           # the fitted model (mbrl.fit)
@@ -45,14 +51,21 @@ SAVE_EVERY = 250
 SAVE_EVERY_MIN = 10.0                     # a checkpoint every 10 min of training, so a kill loses little
 WANDB_ENTITY = "karl-jahnel-universit-t-leipzig"
 WANDB_PROJECT = "Akos pH MBRL"
-TRAIN_ARGS = ""                           # extra arguments for Full Body's rl/<task>/train.py
+TRAIN_ARGS = ""                           # extra arguments for Full Body's rl/<task>/train.py (or the getup-* scripts)
+PLAN_KINDS = "supine,prone"               # getup-plan: one plan per lying kind
+PLAN_TAG = "v1"                           # getup-plan: plans/getup-<kind>-<tag>.pt
+PLAN_ITERATIONS = 200                     # getup-plan: upper bound; the time budget usually ends each search first
+PLANS = "plans/getup-supine-v1.pt,plans/getup-prone-v1.pt"   # getup-track: the plans (committed in this repo)
+DAGGER_ITERS = 300                        # getup-track: DAgger warm-start iterations before PPO
 RESUME = ""                               # W&B run (name or id) in WANDB_PROJECT to continue from; "" = fresh
 SESSION_HOURS = 11.0                      # our own cap, 1 h under Kaggle's 12 h (kaggle/run.sh pushes with the same
                                           # timeout): the kernel never runs into Kaggle's limit
 MARGIN_MINUTES = 30                       # kept free after the training: final checkpoint, deploy.bin, W&B artifact
 
 TASK_DEFAULTS = {"stand": {"iterations": 3000, "video_every": 500, "video_every_min": 0.0},
-                 "getup": {"iterations": 100000, "video_every": 0, "video_every_min": 30.0}}
+                 "getup": {"iterations": 100000, "video_every": 0, "video_every_min": 30.0},
+                 "getup-plan": {"iterations": 0, "video_every": 0, "video_every_min": 0.0},
+                 "getup-track": {"iterations": 100000, "video_every": 0, "video_every_min": 30.0}}
 REPO = "https://github.com/akuduku/K1-Model-Based-RL.git"
 WORK = Path("/kaggle/working")
 SRC = Path("/tmp/mbrl")
@@ -144,9 +157,9 @@ def reachable(host):
 def main():
     LOGS.mkdir(parents=True, exist_ok=True)
     if TASK not in TASK_DEFAULTS:
-        raise SystemExit(f"TASK={TASK!r}: stand or getup")
+        raise SystemExit(f"TASK={TASK!r}: stand, getup, getup-plan or getup-track")
     d = TASK_DEFAULTS[TASK]
-    run_name = RUN_NAME or f"{TASK}-mb-v1"
+    run_name = RUN_NAME or (f"{TASK}-v1" if TASK.startswith("getup-") else f"{TASK}-mb-v1")
     iterations = ITERATIONS or d["iterations"]
     video_every = d["video_every"] if VIDEO_EVERY < 0 else VIDEO_EVERY
     video_every_min = d["video_every_min"] if VIDEO_EVERY_MIN < 0 else VIDEO_EVERY_MIN
@@ -203,14 +216,26 @@ def main():
     if HOURS > 0:
         budget = min(budget, HOURS * 60)
     log(f"training time budget {budget:.0f} min (session {SESSION_HOURS:g} h, {MARGIN_MINUTES} min margin)")
-    cmd = [py, "-m", "mbrl.train", TASK, "--fit", FIT, "--mode", MODE, *(["--residual", RESIDUAL] if RESIDUAL else []),
-           "--", "--run-name", run_name, "--num-envs", NUM_ENVS, "--iterations", iterations,
-           "--save-every", SAVE_EVERY, "--save-every-min", SAVE_EVERY_MIN,
-           "--video-every", video_every, "--video-every-min", video_every_min,
-           *(["--first-video-min", FIRST_VIDEO_MIN] if video_every_min > 0 else []),
-           "--wandb-project", WANDB_PROJECT, "--wandb-entity", WANDB_ENTITY, "--log-root", WORK / "runs",
-           "--max-minutes", f"{max(budget, 1):.1f}", *(["--resume-wandb", RESUME] if RESUME else []),
-           *TRAIN_ARGS.split()]
+    harness = ["--run-name", run_name, "--num-envs", NUM_ENVS, "--iterations", iterations,
+               "--save-every", SAVE_EVERY, "--save-every-min", SAVE_EVERY_MIN,
+               "--video-every", video_every, "--video-every-min", video_every_min,
+               *(["--first-video-min", FIRST_VIDEO_MIN] if video_every_min > 0 else []),
+               "--wandb-project", WANDB_PROJECT, "--wandb-entity", WANDB_ENTITY, "--log-root", WORK / "runs",
+               "--max-minutes", f"{max(budget, 1):.1f}", *(["--resume-wandb", RESUME] if RESUME else [])]
+    if TASK == "getup-plan":
+        kinds = [k for k in PLAN_KINDS.split(",") if k.strip()]
+        per_kind = max(budget / len(kinds) - 6.0, 1.0)  # each kind: its search, then ~5 min for the final rollouts
+        log(f"planner: {per_kind:.0f} min per kind for {kinds}")
+        cmd = [py, "-m", "mbrl.getup.plan", "--kinds", PLAN_KINDS, "--tag", PLAN_TAG, "--minutes", f"{per_kind:.1f}",
+               "--iterations", PLAN_ITERATIONS, "--out", WORK / "plans", "--run-name", run_name, "--video",
+               "--wandb-project", WANDB_PROJECT, "--wandb-entity", WANDB_ENTITY, *(["--fit", FIT] if FIT else []),
+               *TRAIN_ARGS.split()]
+    elif TASK == "getup-track":
+        cmd = [py, "-m", "mbrl.getup.train", "--plans", PLANS, "--dagger-iters", DAGGER_ITERS,
+               *(["--fit", FIT] if FIT else []), *harness, *TRAIN_ARGS.split()]
+    else:
+        cmd = [py, "-m", "mbrl.train", TASK, "--fit", FIT, "--mode", MODE,
+               *(["--residual", RESIDUAL] if RESIDUAL else []), "--", *harness, *TRAIN_ARGS.split()]
     start = time.time()
     code = run(cmd, "train.log", env=env, cwd=SRC, check=False)
     log(f"training exit code {code} after {(time.time() - start) / 60:.1f} min")

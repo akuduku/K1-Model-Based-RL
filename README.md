@@ -32,10 +32,15 @@ mbrl/
   residual.py   learned pH residual: -d(x) theta_dot (d >= 0, passive) + bounded torque u(x), ensemble of K MLPs
   model.py      attach(plant, fit, residual): parameter ensemble + residual on any env's plant
   train.py      Full Body's rl/<task>/train.py on the fitted model (same harness, W&B, deploy.bin)
-tests/          parameter rows, data, replay self-consistency, ensemble/residual attach, env wrapper
-fits/           fitted models (JSON), residual/  residual ensembles (.pt)
-kaggle/         Kaggle kernel train_mb.py (TASK=stand|getup kaggle/run.sh, fetch.sh); the GITHUB_TOKEN in the
-                private dataset <user>/k1-secrets needs read access to this repo AND K1-Full-Body-pH
+  getup/        the model-based get-up: plan with the model, then learn to track the plan (below)
+    keyframes.py  a plan = 5 mirrored keyframes + 6 durations (56 numbers), smoothstep interpolation
+    plan.py       CEM over plans, rolled out in the batched pH plant -> plans/getup-<kind>-<tag>.pt
+    track_env.py  Full Body's GetUpEnv on the StandupAgent contract (72 -> 22) + reward for tracking the plan
+    train.py      DAgger warm start from the plan, then PPO (Full Body's harness); exports the StandupAgent .bin
+tests/          parameter rows, data, replay self-consistency, ensemble/residual attach, env wrapper, getup/
+fits/           fitted models (JSON), residual/  residual ensembles (.pt), plans/  get-up plans (.pt, .json)
+kaggle/         Kaggle kernel train_mb.py (TASK=stand|getup|getup-plan|getup-track kaggle/run.sh, fetch.sh); the
+                GITHUB_TOKEN in the private dataset <user>/k1-secrets needs read access to this repo AND K1-Full-Body-pH
 colab/          colab-train jobs: k1-stand-mb.yaml, k1-getup-mb.yaml (+ setup_gpu.sh, also used by Kaggle)
 ```
 
@@ -60,6 +65,30 @@ colab-train launch --browser colab/k1-stand-mb.yaml                        # or 
 
 The logs are not in git: `MBRL_LOGS` points to the folder that holds `30102026/...` (default:
 `MA/Karls Repo/Logs` next to this repository).
+
+## The model-based get-up (`mbrl/getup/`)
+
+PPO from scratch did not learn the get-up on the plant: getup-mb-v1d/v1e reached a success EMA of 0.08-0.11 after
+160-330 M steps, and without action noise the front start got up in 53 % at best (0 % once the tank and the variable
+gains came in), the back start never.  Here the model is used to *decide*, not only to simulate:
+
+1. **Plan** (Lecture 11, sampling-based planning, offline): CEM searches a get-up motion directly in the pH plant,
+   from scratch (all keyframes at HOME).  A candidate is judged on 8 variants (lying poses, delays 10-40 ms, driver
+   gain errors, half of them on fitted parameters with `--fit`) with the get-up env's own reward plus "finish
+   standing"; an upward assist (100 N) helps at first and is taken away while the best elites keep standing, then
+   the energy terms are weighted in.
+2. **Learn to track** (Lecture 11, option 1 then option 2): the policy has the robot's StandupAgent contract
+   (72 inputs, 22 targets, fixed gains: no firmware change).  DAgger imitates the plan (300 iterations), then PPO
+   trains with the get-up reward plus tracking the plan's motion (fading to x0.2 once it stands); the critic sees the
+   plan's phase, the actor does not.
+
+```bash
+python -m mbrl.getup.plan --smoke                                          # a few seconds, CPU
+python -m mbrl.getup.train --plans plans/getup-supine-v1.pt,plans/getup-prone-v1.pt \
+       --device cpu --num-envs 16 --max-minutes 0.3 --dagger-iters 3 --no-wandb      # smoke (needs plans)
+TASK=getup-plan kaggle/run.sh HOURS=2.5                                    # plans -> outputs/kaggle/<name>/plans
+TASK=getup-track kaggle/run.sh HOURS=6                                     # after the plans are committed
+```
 
 ## First results (2 get-up logs of K1-13, 25 Oct 2026)
 
