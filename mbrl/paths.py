@@ -29,6 +29,18 @@ def logs_root() -> Path:
     return Path(env) if env else REPO.parents[1] / "Karls Repo" / "Logs"
 
 
+def k1_debug_root() -> Path:
+    """eric.plass/k1_debug (the robot's run-log readers and Rerun viewer): $K1_DEBUG, else the sibling ../K1 Debug.
+    Only the sim-to-real tools need it (it is not on Kaggle/Colab); it needs k1_deploy installed or beside it."""
+    for c in (os.environ.get("K1_DEBUG"), REPO.parent / "K1 Debug"):
+        if c and (Path(c) / "k1_debug" / "__init__.py").exists():
+            root = Path(c).resolve()
+            if str(root) not in sys.path:
+                sys.path.insert(0, str(root))
+            return root
+    raise ImportError("k1_debug not found: set K1_DEBUG to a clone of eric.plass/k1_debug")
+
+
 def setup() -> Path:
     root = full_body_root()
     if str(root) not in sys.path:
