@@ -19,6 +19,14 @@ kaggle/run.sh overrides the settings below:
     TASK=getup-plan kaggle/run.sh HOURS=2.5                   # the model-based planner -> plans/ in the output
     TASK=getup-track kaggle/run.sh HOURS=6                    # DAgger + PPO on the committed plans (PLANS)
     TASK=getup-mbrl kaggle/run.sh HOURS=8                     # both in one session: plan (PLAN_HOURS), then track
+    TASK=kick-plan kaggle/run.sh HOURS=2                      # the kick planner (mbrl.kick.plan) -> plans/ in the output
+    TASK=kick-track kaggle/run.sh HOURS=6                     # DAgger + PPO on the committed kick library (KICK_PLAN)
+    TASK=kick-mbrl kaggle/run.sh HOURS=8                      # both in one session
+
+The kick tasks: kick-plan runs `python -m mbrl.kick.plan` (CEM over the kick plan of mbrl/kick/controller.py, one
+search per ball speed in KICK_SPEEDS, through the walk policy WALK), kick-track runs `python -m mbrl.kick.train --plan
+KICK_PLAN`; W&B project KICK_WANDB_PROJECT.  They use the standard robot model and no fitted parameters unless
+KICK_FIT names a fit made on that model.
 
 getup-plan runs `python -m mbrl.getup.plan` (CEM over keyframe motions in the pH plant; FIT gives half of the variants
 fitted parameters), the time budget split over the PLAN_KINDS; its plans land in plans/ of the kernel output (commit
@@ -63,6 +71,16 @@ PLAN_TAG = "v1"                           # getup-plan: plans/getup-<kind>-<tag>
 PLAN_ITERATIONS = 200                     # getup-plan: upper bound; the time budget usually ends each search first
 PLANS = "plans/getup-supine-v1.pt,plans/getup-prone-v1.pt"   # getup-track: the plans (committed in this repo)
 DAGGER_ITERS = 300                        # getup-track: DAgger warm-start iterations before PPO
+KICK_SPEEDS = "2,3.5,5,6"                 # kick-plan: requested ball speeds, one search each
+KICK_CANDIDATES = 96                      # kick-plan: candidates per search and iteration
+KICK_VARIANTS = 8                         # kick-plan: variants every candidate is judged on
+KICK_PLAN = "plans/kick-v1.pt"            # kick-track: the library (committed in this repo); kick-plan/-mbrl with
+                                          # KICK_PLAN_INIT=1 start their searches around it
+KICK_PLAN_INIT = False
+KICK_FIT = ""                             # a fit made on the standard robot model, or "" (fits/getup-both-v1.json
+                                          # was made on the older hand model: not for the kick)
+WALK = "policies/walk_teacher.pt"         # the walk policy the kick plan acts through (TorchScript, 75 -> 22)
+KICK_WANDB_PROJECT = "Akos pH Kick MBRL"
 RESUME = ""                               # W&B run (name or id) in WANDB_PROJECT to continue from; "" = fresh
 SESSION_HOURS = 11.0                      # our own cap, 1 h under Kaggle's 12 h (kaggle/run.sh pushes with the same
                                           # timeout): the kernel never runs into Kaggle's limit
@@ -72,7 +90,10 @@ TASK_DEFAULTS = {"stand": {"iterations": 3000, "video_every": 500, "video_every_
                  "getup": {"iterations": 100000, "video_every": 0, "video_every_min": 30.0},
                  "getup-plan": {"iterations": 0, "video_every": 0, "video_every_min": 0.0},
                  "getup-track": {"iterations": 100000, "video_every": 0, "video_every_min": 30.0},
-                 "getup-mbrl": {"iterations": 100000, "video_every": 0, "video_every_min": 30.0}}
+                 "getup-mbrl": {"iterations": 100000, "video_every": 0, "video_every_min": 30.0},
+                 "kick-plan": {"iterations": 0, "video_every": 0, "video_every_min": 0.0},
+                 "kick-track": {"iterations": 100000, "video_every": 0, "video_every_min": 30.0},
+                 "kick-mbrl": {"iterations": 100000, "video_every": 0, "video_every_min": 30.0}}
 REPO = "https://github.com/akuduku/K1-Model-Based-RL.git"
 WORK = Path("/kaggle/working")
 SRC = Path("/tmp/mbrl")
@@ -164,9 +185,11 @@ def reachable(host):
 def main():
     LOGS.mkdir(parents=True, exist_ok=True)
     if TASK not in TASK_DEFAULTS:
-        raise SystemExit(f"TASK={TASK!r}: stand, getup, getup-plan, getup-track or getup-mbrl")
+        raise SystemExit(f"TASK={TASK!r}: stand, getup, getup-plan, getup-track, getup-mbrl, kick-plan, kick-track "
+                         "or kick-mbrl")
     d = TASK_DEFAULTS[TASK]
-    run_name = RUN_NAME or (f"{TASK}-v1" if TASK.startswith("getup-") else f"{TASK}-mb-v1")
+    run_name = RUN_NAME or (f"{TASK}-v1" if TASK.startswith(("getup-", "kick-")) else f"{TASK}-mb-v1")
+    project = KICK_WANDB_PROJECT if TASK.startswith("kick-") else WANDB_PROJECT
     iterations = ITERATIONS or d["iterations"]
     video_every = d["video_every"] if VIDEO_EVERY < 0 else VIDEO_EVERY
     video_every_min = d["video_every_min"] if VIDEO_EVERY_MIN < 0 else VIDEO_EVERY_MIN
@@ -229,8 +252,21 @@ def main():
                 "--save-every", SAVE_EVERY, "--save-every-min", SAVE_EVERY_MIN,
                 "--video-every", video_every, "--video-every-min", video_every_min,
                 *(["--first-video-min", FIRST_VIDEO_MIN] if video_every_min > 0 else []),
-                "--wandb-project", WANDB_PROJECT, "--wandb-entity", WANDB_ENTITY, "--log-root", WORK / "runs",
+                "--wandb-project", project, "--wandb-entity", WANDB_ENTITY, "--log-root", WORK / "runs",
                 "--max-minutes", f"{max(minutes, 1):.1f}", *(["--resume-wandb", RESUME] if RESUME else [])]
+
+    def kick_plan_cmd(name, minutes):
+        search = max(minutes - 10.0, 1.0)  # the search, then ~10 min for the final rollouts and videos
+        log(f"kick planner: {search:.0f} min for the speeds {KICK_SPEEDS}")
+        return [py, "-m", "mbrl.kick.plan", "--speeds", KICK_SPEEDS, "--candidates", KICK_CANDIDATES,
+                "--variants", KICK_VARIANTS, "--tag", PLAN_TAG, "--minutes", f"{search:.1f}",
+                "--iterations", PLAN_ITERATIONS, "--walk", WALK, "--out", WORK / "plans", "--run-name", name, "--video",
+                "--video-every-min", 15, "--wandb-project", project, "--wandb-entity", WANDB_ENTITY,
+                *(["--fit", KICK_FIT] if KICK_FIT else []), *(["--init-plan", KICK_PLAN] if KICK_PLAN_INIT else [])]
+
+    def kick_track_cmd(name, minutes, plan):
+        return [py, "-m", "mbrl.kick.train", "--plan", plan, "--walk", WALK, "--dagger-iters", DAGGER_ITERS,
+                *harness(name, minutes), *TRAIN_ARGS.split()]
 
     def plan_cmd(name, minutes):
         kinds = [k for k in PLAN_KINDS.split(",") if k.strip()]
@@ -253,7 +289,29 @@ def main():
         if code:
             raise SystemExit(f"{what} failed (exit code {code}), see logs/train.log")
 
-    if TASK == "getup-plan":
+    if TASK == "kick-plan":
+        go(kick_plan_cmd(run_name, budget), "planning")
+    elif TASK == "kick-track":
+        go(kick_track_cmd(run_name, budget, KICK_PLAN), "training")
+    elif TASK == "kick-mbrl":
+        # 1. plan the kick with the model, 2. learn to track the fresh library with the time that is left
+        go(kick_plan_cmd(f"{run_name}-plan", min(PLAN_HOURS * 60, budget - 60)), "planning")
+        p = WORK / "plans" / f"kick-{PLAN_TAG}.pt"
+        meta = json.loads(p.with_suffix(".json").read_text())
+        ok = all(s >= 0.75 for s in meta["success"])
+        log(f"kick library: good kicks per speed {dict(zip(meta['speeds'], meta['success']))} "
+            f"({'PASS' if ok else 'below the gate of 0.75'})")
+        if not (ok or FORCE_TRACK):  # imitating a plan that does not kick teaches the wrong thing: keep the GPU quota
+            log("the library missed the gate: no tracking (FORCE_TRACK=1 to track anyway); it is in plans/ of the "
+                "output: commit it and continue with TASK=kick-plan KICK_PLAN_INIT=1")
+            log("done")
+            return
+        left = SESSION_HOURS * 60 - (time.time() - KERNEL_START) / 60 - MARGIN_MINUTES
+        if HOURS > 0:
+            left = min(left, HOURS * 60 - (time.time() - KERNEL_START) / 60)
+        log(f"tracking the kick library: {left:.0f} min left")
+        go(kick_track_cmd(f"{run_name}-track", left, str(p)), "training")
+    elif TASK == "getup-plan":
         go(plan_cmd(run_name, budget), "planning")
     elif TASK == "getup-track":
         go(track_cmd(run_name, budget, PLANS), "training")
