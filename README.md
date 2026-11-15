@@ -1,5 +1,7 @@
 # K1 Model-Based RL: the pH plant fitted to the real robot
 
+**Start here:** `docs/EXPERIMENTS.md` (the thesis experiments: rules, status, next work packages).
+
 Part of the master thesis *Physics-informed Reinforcement Learning for Soccer Robots* (Akos Eross, HTWK Leipzig).
 This repository turns the hand-built port-Hamiltonian plant of the Booster K1
 ([K1-Full-Body-pH](https://github.com/akuduku/K1-Full-Body-pH), submodule `external/full-body`) into a
@@ -37,9 +39,18 @@ mbrl/
     plan.py       CEM over plans, rolled out in the batched pH plant -> plans/getup-<kind>-<tag>.pt
     track_env.py  Full Body's GetUpEnv on the StandupAgent contract (72 -> 22) + reward for tracking the plan
     train.py      DAgger warm start from the plan, then PPO (Full Body's harness); exports the StandupAgent .bin
+  kick/         the model-based walk-and-kick (below)
+    controller.py the plan: the walk policy steered to a stand-off pose behind the ball, then a keyframe motion of
+                  the legs added to the walk policy's action (54 numbers)
+    plan.py       CEM over plans, one search per ball speed -> plans/kick-<tag>.pt
+    demo.py       a kick policy's leg motion as keyframes: an optional start for the searches
+    track_env.py  Full Body's KickEnv (kick_walk contract + request clock: 166 -> 22) + reward for acting like the plan
+    train.py      DAgger warm start from the plan, then PPO; --teacher-report evaluates the plan itself
 tests/          parameter rows, data, replay self-consistency, ensemble/residual attach, env wrapper, getup/
-fits/           fitted models (JSON), residual/  residual ensembles (.pt), plans/  get-up plans (.pt, .json)
-kaggle/         Kaggle kernel train_mb.py (TASK=stand|getup|getup-plan|getup-track kaggle/run.sh, fetch.sh); the
+fits/           fitted models (JSON), residual/  residual ensembles (.pt), plans/  get-up and kick plans (.pt, .json)
+policies/       walk_teacher.pt: the walk policy the robot runs (TorchScript, 75 -> 22), which the kick plan acts through
+kaggle/         Kaggle kernel train_mb.py (TASK=stand|getup|getup-plan|getup-track|kick-plan|kick-track|kick-mbrl
+                kaggle/run.sh, fetch.sh); the
                 GITHUB_TOKEN in the private dataset <user>/k1-secrets needs read access to this repo AND K1-Full-Body-pH
 colab/          colab-train jobs: k1-stand-mb.yaml, k1-getup-mb.yaml (+ setup_gpu.sh, also used by Kaggle)
 ```
@@ -89,6 +100,75 @@ python -m mbrl.getup.train --plans plans/getup-supine-v1.pt,plans/getup-prone-v1
 TASK=getup-plan kaggle/run.sh HOURS=2.5                                    # plans -> outputs/kaggle/<name>/plans
 TASK=getup-track kaggle/run.sh HOURS=6                                     # after the plans are committed
 ```
+
+## The model-based walk-and-kick (`mbrl/kick/`): a reference
+
+**This is not the thesis' model-based arm** (`docs/EXPERIMENTS.md` has the experiment's rules and the next work
+packages): the plan below acts through Eric Plass's walk policy, its search started from his kick motion, and the
+tracker ends with PPO. It shows what planning in the pH model can do with that help.
+
+The task is Full Body's `rl/kick` (Eric Plass's k1_kick on the pH plant with its ball): walk, then kick a ball in a
+requested direction at a requested speed and stand again.  The model is used to decide how to kick.
+
+**The plan is a controller, not a joint motion.**  An open-loop keyframe motion tips a standing robot over (the
+get-up's first plan did), so the plan acts through the walk policy the robot already runs, which keeps the balance:
+
+| Phase | Action |
+|---|---|
+| walking | the walk policy with the env's velocity command |
+| approach | the walk policy, its command set by a P-controller that brings the trunk to a stand-off pose behind the ball, facing the kick direction |
+| kick | the walk policy with zero command + 4 keyframes of offsets on the 12 leg joints |
+| afterwards | the walk policy with zero command: it stands |
+
+The search (CEM, in the batched pH plant) tunes 54 numbers per ball speed: where the ball lies relative to the trunk
+at the kick, the keyframe offsets, their durations.  A candidate is judged on 6-8 variants (ball positions over the
+task's range, kick directions ±0.6 rad, delays 0-70 ms, driver gain errors).  Its cost is the kick (direction, speed,
+loft), a fall, the electrical energy from the plant's ledger, and standing in the stance for all of the last 2 s; a
+ball bumped during the approach does not count as a kick.
+
+What the searches showed (laptop CPU, 288 robots, 15 s per iteration):
+
+- From scratch (zero offsets, wide distribution, 30 iterations): the ball is touched in every variant without a fall,
+  but at 1.1 m/s instead of 3.5 and 53° off: a nudge.
+- The leg motion of k1_kick's kick-018, replayed as keyframes through the walk policy, does not kick either (0.7-1.9
+  m/s instead of 3.4 m/s in exactly the situation it was recorded in, and it changes with the command delay): that
+  kick is a closed-loop skill.
+- Started from that motion (`--init-demo`, half the spread), 40 iterations: a good kick in 5 of 6 variants, 2.9 m/s
+  for a 3.5 m/s request, 2.8° off, no falls, standing 97 % of the last 2 s (`plans/kick-3p5-v0.pt`).
+
+That plan as a controller on the whole task, which the search did not cover (256 robots, random balls 0.3-1.0 m
+ahead, requests that come mid-walk; `python -m mbrl.kick.train --plan plans/kick-3p5-v0.pt --teacher-report`):
+
+| | the plan | with the training's noise, pushes, delays | k1_kick's kick-018 on the pH plant |
+|---|---|---|---|
+| kicked | 99.2 % | 90.9 % | 99.8 % |
+| direction error | 6.2° | 10.9° | 11.8° |
+| within 5° / 10° | 54 % / 82 % | 36 % / 65 % | 27 % / 52 % |
+| falls | 1.2 % | 3.9 % | 0.2 % |
+| ball speed | 2.9 m/s whatever is requested | 2.4 m/s | follows the request, 4.9 m/s at full power |
+| electrical energy per kick | 389 J | 427 J | 382 J |
+
+The plan aims better than the MuJoCo-trained policy (it turns the robot to face the direction first) and it needs
+1.6 s to the touch instead of 0.5 s; it reads the true ball and trunk pose, the policy that learns from it does not.
+
+**Learn to track** (`track_env.py`, `train.py`): the policy has the robot's kick_walk inputs plus the seconds since
+the request (166 inputs; the firmware agent has to append that clock), because the plan's kick is a function of time.
+DAgger imitates the plan (it counts in the time budget), then PPO trains with the kick env's task reward plus acting
+like the plan, a term that fades to x0.2 once 80 % of the kicks are good.  Not trained yet.
+
+```bash
+python -m mbrl.kick.plan --smoke                                           # about 10 s, CPU
+python -m mbrl.kick.plan --speeds 3.5 --candidates 48 --variants 6 --iterations 40 \
+       --init-demo ../k1_kick/checkpoints/kick_018.pt --tag 3p5-v0         # 10 min on a laptop
+python -m mbrl.kick.train --plan plans/kick-3p5-v0.pt --teacher-report -B 256 [--report-noise]
+python -m mbrl.kick.train --plan plans/kick-v1.pt --device cpu --num-envs 16 --iterations 2 --dagger-iters 3 --no-wandb
+TASK=kick-track kaggle/run.sh HOURS=6                                      # DAgger + PPO on plans/kick-v1.pt
+```
+
+W&B project "Akos pH Kick MBRL": `Plan/` during a search (good kicks, cost, speed, direction and standing per ball
+speed), then `Track/` (action error to the plan, the tracking weight, good kicks, the plan's phases, the DAgger
+curve) next to everything Full Body's `rl/kick` logs (`Kick/`, `Energy/`, `Motors/`, `Eval/`, the video with the
+Hamiltonian figure).
 
 ## First results (2 get-up logs of K1-13, 25 Oct 2026)
 
