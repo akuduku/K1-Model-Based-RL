@@ -74,6 +74,23 @@ Results so far that belong in the thesis:
 - Ask the owner before any Kaggle launch (quota: about 30 GPU-hours per week).
 - Gitea needs the HTWK VPN (`snxctl connect`). Slides, PDFs and notes stay out of the repositories.
 
+## Status of the packages (update this list)
+
+| Package | Status |
+|---|---|
+| 1 secure, commit, handover file | done 15 Nov |
+| 2 ball on the GPU | **open**: the kernel was not launched yet (see the command in the package) |
+| 3 snapshot / restore | done 15 Nov for the plant and `StandEnv` (test `rl/stand/tests`, exact) |
+| 4 learner on standing | code and tests done (`mbrl/mpc`, `tests/test_mpc.py`, `rl/stand/evaluate.py`); **the laptop gate is not passed**, see "Package 4: first findings" |
+| 5-7 | open |
+
+Reference rows for stage 1 (`python rl/stand/evaluate.py --policy <file> -B 128`, 10 s episodes, pushes and noise):
+
+| Policy | Fell | Stood | Power | Tilt |
+|---|---|---|---|---|
+| doing nothing (`--policy zero`) | 100 % | 3.1 s | 8.6 W | 6.2° |
+| PPO `stand-ph-v1` (`deploy_2999.bin`, 295 M executed steps) | 0 % | 10.0 s | 2.1 W | 0.33° |
+
 ## Work packages
 
 Do them in order. Each ends with `scripts/test_all.sh` green, a commit, a push, and the tables above updated.
@@ -118,6 +135,19 @@ Do them in order. Each ends with `scripts/test_all.sh` green, a commit, a push, 
 - Done when (laptop, 30-60 min, 16 robots): robots under the planner stand clearly longer than the 3.8 s of doing
   nothing, and the policy alone (no planner) improves over the run. If not: horizon 10 -> 20, candidates 16 -> 64,
   the noise level, value targets from the planner's own estimate.
+
+#### Package 4: first findings (16 Nov)
+- First laptop run (`--robots 16 --candidates 16 --horizon 10`, 24 iterations, 9216 executed steps): the robots
+  under the planner fell after 1.3-1.8 s, sooner than with no action at all (3.1 s); the bare policy fell after 1.5 s.
+  The planner did score above the bare policy in its own rollouts, so the mechanics work; what it optimised was wrong.
+- Suspected cause: the untrained value network. Rewards inside a 0.2 s horizon sum to about 0.3, the value estimate
+  at its end was up to 3 and noisy (value loss jumped to 2), so the planner followed the value's noise. The value was
+  fitted on 384 samples per iteration, far too few.
+- Next steps, in this order: (a) the planner alone, value = 0, policy = start pose: does it stand longer than 3.1 s,
+  and with which horizon (10, 20, 35 steps)? (b) fit the value on the replay of the last rollouts, lower its learning
+  rate, and let its weight in the planner's score rise from 0 over the first iterations; (c) more world robots.
+- Trap: do not stop a run with `pkill -f mbrl.mpc.train` from the same shell line that mentions it; it kills the
+  shell too. Use the process id.
 
 ### Package 5: stage 1 result (small; ~6 h of Kaggle)
 - Do: a Kaggle task `mb-stand` in `kaggle/train_mb.py` and `kaggle/common.sh` (as `kick-track` was added), run
