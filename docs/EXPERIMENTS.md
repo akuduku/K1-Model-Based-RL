@@ -1,4 +1,4 @@
-# Thesis experiments: model-based RL with the pH plant against PPO
+# Thesis experiments: the pH plant as planner against the pH plant as simulator for PPO
 
 This file is the working plan of the thesis experiments: the rules, what exists, and the next work packages. Each
 package has a goal, the files it touches, what to reuse, and a check that says it is done. Update the status tables
@@ -6,12 +6,20 @@ when a package is finished.
 
 ## The question and the rules
 
-Two ways of learning the same skills on the Booster K1 are compared:
+Words, as in Plaat, *Deep Reinforcement Learning* (2022), chapter 5 (checked against it on 16 Nov 2026):
+the **environment** is the real robot; its stand-ins are the pH plant with randomisation, noise and pushes (the
+"world" of a run) and MuJoCo. The **model** is the port-Hamiltonian plant (Full Body), with parameters fitted to
+robot logs (`mbrl/fit.py`). Both arms use this model, so both are model-based in the book's sense; they differ in
+*how* they use it:
 
-- **Model-based arm.** The port-Hamiltonian plant (Full Body) is the model, for the physics *and* for the planning.
-  At every control step a planner looks a short time ahead in the model; a policy network and a value network learn
-  together with it.
-- **PPO arm.** rsl-rl PPO on the same plant (Full Body `rl/<skill>/train.py`).
+- **Arm B, "pH as planner"** (called the model-based arm in this file). Planning at decision time (the book's
+  MPC, 5.2.2.1): at every control step a planner looks a short time ahead in the model; a policy network and a
+  value network learn together with it.
+- **Arm A, "pH as simulator"** (called the PPO arm). Model-free rsl-rl PPO on samples from the model (the book's
+  imagination, Alg. 5.1 / 5.4 with a given model; Full Body `rl/<skill>/train.py`).
+
+The question: with the same model, does planning at decision time reach the same quality with fewer environment
+samples, and at what cost in computing?  "It does not" is a valid result.
 
 Rules (set on 15 Nov 2026):
 
@@ -21,8 +29,13 @@ Rules (set on 15 Nov 2026):
    stage. Nothing crosses between the arms.
 3. Both arms: the same plant, task, rewards, randomisation (noise, pushes, delays, gain errors), the same final
    network (512-256-128 ELU, the firmware's `.bin`), the same evaluation script.
-4. Cost is reported twice: **executed steps** (what a robot did) and **simulated steps** (planning included).
-5. Correct before fast. A result that only holds with a trick is reported as such or not at all.
+4. Cost is reported as: **environment steps** (executed; what a robot did), **model steps** (planning included),
+   and **hours** on the named GPU.  The book's warning (5.3.3): fewer environment steps do not mean less time.
+5. Quality is scored on an environment that is **not** the planning model: MuJoCo first (`rl/stand/eval_mujoco.py`),
+   the real robot where possible; the pH numbers stand next to it.
+6. A row of the thesis table needs **3 seeds** per arm (results depend on the seed, book 5.3.1).  The checkpoint
+   that counts is the one with the best evaluation inside the run, by the same rule for both arms.
+7. Correct before fast. A result that only holds with a trick is reported as such or not at all.
 
 Eric's policies are used for one thing only: to check an environment (his MuJoCo-trained kick runs in `rl/kick`
 unchanged, so the env, the ball and the observations are right). `mbrl/kick/` (a kick plan that acts through his
@@ -79,10 +92,11 @@ Results so far that belong in the thesis:
 | Package | Status |
 |---|---|
 | 1 secure, commit, handover file | done 15 Nov |
-| 2 ball on the GPU | **open**: the kernel was not launched yet (see the command in the package) |
+| 2 ball on the GPU | done 16 Nov inside the `mb-stand` kernel: nvcc build, 70 Full Body tests and 40 tests of this repo passed on the T4 (`outputs/kaggle/mb-stand-v1/logs/setup.log`) |
 | 3 snapshot / restore | done 15 Nov for the plant and `StandEnv` (test `rl/stand/tests`, exact) |
 | 4 learner on standing | **done 16 Nov, laptop gate passed** (see "Package 4: findings"): the policy alone stands |
-| 5-7 | open |
+| 5 stage 1 result | **run done 16 Nov, result below: not yet level with PPO; the learner drifts after its best point (see "Package 5: findings")** |
+| 6-7 | open; do not start before the learner holds its best point |
 
 Reference rows for stage 1 (`python rl/stand/evaluate.py --policy <file> -B 128`, 10 s episodes, pushes and noise):
 
@@ -92,9 +106,16 @@ Reference rows for stage 1 (`python rl/stand/evaluate.py --policy <file> -B 128`
 | PPO `stand-ph-v1` (`deploy_2999.bin`, 295 M executed steps) | 0 % | 10.0 s | 2.1 W | 0.33° |
 | model-based, laptop (`policies/mb-stand-laptop3_346.bin`, 0.53 M executed + 21 M model steps, 85 min on 6 CPU cores) | 11.7 % | 9.65 s | 14.4 W | 2.5° |
 
-Without pushes and noise (`--quiet`): PPO 0 % falls, 1.0 W; model-based 0 % falls, 11.3 W.  The model-based policy
-is from a short laptop run: it stands, it is not yet as steady or as economical as the PPO one.  Package 5 is the
-long run.
+| model-based, Kaggle `mb-stand-v1`, best checkpoint (`policies/mb-stand-v1_260.bin`, 1.6 M executed + 64 M model steps, 2.2 h on a T4) | 2.3 % | 9.94 s | 14.0 W | 1.3° |
+| model-based, Kaggle `mb-stand-v1`, end of the run (`policies/mb-stand-v1_708.bin`, 4.35 M executed + 174 M model steps, 6 h) | 10.2 % | 9.73 s | 24.6 W | 2.1° |
+
+Without pushes and noise (`--quiet`): PPO 0 % falls, 1.0 W; model-based 0 % falls at 13.3 W (best) and 20.9 W (end).
+In MuJoCo (`rl/stand/eval_mujoco.py --seconds 20`, quiet and `--push 0.3`): all three stand the 20 s; largest tilt
+PPO 0.4° / 0.7°, model-based best 3.9° / 3.9°, model-based end 1.5° / 2.1°.
+
+**Stage 1 as it stands (16 Nov): the model-based arm learns to stand from scratch with about 1 M executed steps
+(PPO: about 14 M), but its policy is not as good as PPO's: 7 times the power, and it still falls under pushes.
+It is not a result for the thesis table yet.**
 
 ## Work packages
 
@@ -178,6 +199,25 @@ Do them in order. Each ends with `scripts/test_all.sh` green, a commit, a push, 
   simulated steps); also `Full Body/rl/stand/eval_mujoco.py` for both.
 - Done when: the comparison table of stage 1 is in this file. If the model-based policy is clearly worse, fix the
   learner before any later stage: it is the same learner everywhere.
+
+#### Package 5: findings (16 Nov, `mb-stand-v1`, 256 x 8 x 5, sigma 0.2, 6 h)
+- The evaluation inside the run (128 robots, every 20 min): 100 % falls at 0.28 M executed steps, 11 % at 0.8 M,
+  0 % at 1.05 M (13.6 W).  Best stretch: 1.05-1.6 M steps (0-2 % falls, 13-14 W).
+- After that the run got slowly **worse**, not better: reward per step 0.025 -> 0.021, power 14 -> 18-25 W, falls
+  under pushes 0-2 % -> 10-18 %, the action-rate penalty 5 times larger.  Quiet evaluation stayed at 0 % falls.
+- What the log says about the cause (a reading of the log, not yet proven): once the robot stands, the best of the
+  8 candidates scores only 0.3 % above the bare policy (`Plan/return_best` 2.44 against `Plan/return_policy` 2.43).
+  With 5 steps of horizon the model's own rewards are about 0.1 of a score of 2.4; the rest is the value network at
+  the horizon.  So the ranking of the candidates is decided by small differences of the value network, the policy
+  imitates that, the value then fits the changed policy: nothing ties the loop to the real reward, and it wanders.
+- New in the log since 16 Nov: `Plan/reward_step_planner` against `Plan/reward_step_policy` (reward in the world of
+  the robots the planner controls against the robots the bare policy controls) and `Plan/correction` (mean size of
+  planner action minus policy action).  If the planner's robots do not earn more than the policy's, imitating the
+  planner cannot improve the policy.
+- Fixes to try, in this order, each on the laptop first from `model_260.pt` (`--resume`): (1) a longer horizon
+  (25 steps = 0.5 s) so that model rewards carry the score; (2) lower `--sigma` (0.2 -> 0.05) once it stands, the
+  policy imitates that noise; (3) keep the checkpoint with the best evaluation and say so in the thesis (the same
+  rule for PPO).
 
 ### Package 6: walking, both arms (medium + ~7 h of Kaggle per run)
 - Do: `Full Body/rl/walk/{env,train,evaluate}.py`: Eric's walk task and rewards on the pH plant, ported from

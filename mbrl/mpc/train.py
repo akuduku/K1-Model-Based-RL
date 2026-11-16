@@ -65,6 +65,7 @@ def main():
     ap.add_argument("--policy-share", type=float, default=0.5)
     ap.add_argument("--steps", type=int, default=24, help="control steps per iteration (T)")
     ap.add_argument("--lr", type=float, default=1e-3)
+    ap.add_argument("--value-lr", type=float, default=3e-4)
     ap.add_argument("--iterations", type=int, default=1_000_000)
     ap.add_argument("--minutes", type=float, default=0.0)
     ap.add_argument("--hours", type=float, default=0.0)
@@ -86,7 +87,7 @@ def main():
 
     world, model, export, evaluate, video, after_restore = TASKS[args.task](args)
     cfg = LearnConfig(candidates=args.candidates, horizon=args.horizon, sigma=args.sigma, temperature=args.temperature,
-                      policy_share=args.policy_share, steps=args.steps, lr=args.lr, seed=args.seed)
+                      policy_share=args.policy_share, steps=args.steps, lr=args.lr, value_lr=args.value_lr, seed=args.seed)
     run = None
     if not args.no_wandb:
         import wandb

@@ -101,6 +101,10 @@ class Learner:
         for opt, key in ((self.opt_p, "opt_p"), (self.opt_v, "opt_v")):
             if key in info:
                 opt.load_state_dict(info[key])
+        # the optimiser's saved state carries its old learning rate: this run's settings win
+        for opt, lr in ((self.opt_p, self.cfg.lr), (self.opt_v, self.cfg.value_lr)):
+            for group in opt.param_groups:
+                group["lr"] = lr
         self.log(f"[mb] continuing at iteration {self.iteration} ({self.executed} executed steps)")
 
     def act(self, obs) -> torch.Tensor:
@@ -112,7 +116,7 @@ class Learner:
     def collect(self) -> dict:
         world, cfg, R = self.world, self.cfg, self.world.num_envs
         dev = world.device
-        O, C, A, Rw, D, TO, V = [], [], [], [], [], [], []
+        O, C, A, Rw, D, TO, V, Corr = [], [], [], [], [], [], [], []
         stats = {k: [] for k in ("return_policy", "return_planner", "return_best", "weight_entropy")}
         lengths = {"policy": [], "planner": []}   # seconds of the episodes that ended, by who controlled the robot
         env_log: dict = {}
@@ -124,6 +128,7 @@ class Learner:
                 O.append(obs["policy"].float())
                 C.append(obs["critic"].float())
                 A.append(a_plan.float())
+                Corr.append((a_plan - info["policy_action"]).abs().mean())
                 V.append(self.value(obs["critic"]).squeeze(-1))
                 obs, r, done, extras = world.step(a)
                 Rw.append(r.float())
@@ -155,7 +160,13 @@ class Learner:
         self.executed += R * cfg.steps
         out = {"obs": torch.cat(O), "critic": torch.cat(C), "action": torch.cat(A), "ret": torch.cat(returns)}
         out["stats"] = {k: float(torch.cat(v).mean()) for k, v in stats.items()}
-        out["stats"]["reward_step"] = float(torch.stack(Rw).mean())
+        rw, bare = torch.stack(Rw), self.bare[:, 0]
+        out["stats"]["reward_step"] = float(rw.mean())
+        # the planner's worth in the world: reward of the robots it controls against the bare policy's robots
+        if bare.any() and (~bare).any():
+            out["stats"]["reward_step_policy"] = float(rw[:, bare].mean())
+            out["stats"]["reward_step_planner"] = float(rw[:, ~bare].mean())
+        out["stats"]["correction"] = float(torch.stack(Corr).mean())   # |planner action - policy action|
         out["stats"]["done_rate"] = float(torch.stack(D).mean())
         for k, v in lengths.items():
             v = torch.cat(v)
