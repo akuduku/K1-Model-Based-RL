@@ -81,7 +81,7 @@ Results so far that belong in the thesis:
 | 1 secure, commit, handover file | done 15 Nov |
 | 2 ball on the GPU | **open**: the kernel was not launched yet (see the command in the package) |
 | 3 snapshot / restore | done 15 Nov for the plant and `StandEnv` (test `rl/stand/tests`, exact) |
-| 4 learner on standing | code and tests done (`mbrl/mpc`, `tests/test_mpc.py`, `rl/stand/evaluate.py`); **the laptop gate is not passed**, see "Package 4: first findings" |
+| 4 learner on standing | **done 16 Nov, laptop gate passed** (see "Package 4: findings"): the policy alone stands |
 | 5-7 | open |
 
 Reference rows for stage 1 (`python rl/stand/evaluate.py --policy <file> -B 128`, 10 s episodes, pushes and noise):
@@ -90,6 +90,11 @@ Reference rows for stage 1 (`python rl/stand/evaluate.py --policy <file> -B 128`
 |---|---|---|---|---|
 | doing nothing (`--policy zero`) | 100 % | 3.1 s | 8.6 W | 6.2° |
 | PPO `stand-ph-v1` (`deploy_2999.bin`, 295 M executed steps) | 0 % | 10.0 s | 2.1 W | 0.33° |
+| model-based, laptop (`policies/mb-stand-laptop3_346.bin`, 0.53 M executed + 21 M model steps, 85 min on 6 CPU cores) | 11.7 % | 9.65 s | 14.4 W | 2.5° |
+
+Without pushes and noise (`--quiet`): PPO 0 % falls, 1.0 W; model-based 0 % falls, 11.3 W.  The model-based policy
+is from a short laptop run: it stands, it is not yet as steady or as economical as the PPO one.  Package 5 is the
+long run.
 
 ## Work packages
 
@@ -136,7 +141,7 @@ Do them in order. Each ends with `scripts/test_all.sh` green, a commit, a push, 
   nothing, and the policy alone (no planner) improves over the run. If not: horizon 10 -> 20, candidates 16 -> 64,
   the noise level, value targets from the planner's own estimate.
 
-#### Package 4: first findings (16 Nov)
+#### Package 4: findings (16 Nov)
 - First laptop run (`--robots 16 --candidates 16 --horizon 10`, 24 iterations, 9216 executed steps): the robots
   under the planner fell after 1.3-1.8 s, sooner than with no action at all (3.1 s); the bare policy fell after 1.5 s.
   The planner did score above the bare policy in its own rollouts, so the mechanics work; what it optimised was wrong.
@@ -157,12 +162,19 @@ Do them in order. Each ends with `scripts/test_all.sh` green, a commit, a push, 
   shows the episode lengths of both groups.  Laptop run 3 continues run 2 with it
   (`--resume logs/mb-stand-laptop2/model_165.pt`).  **The gate needs: the policy group's episodes near 10 s and
   `rl/stand/evaluate.py` on the `deploy_<it>.bin` with few falls.**
+- Laptop run 3 (45 min more, to iteration 346, 531 k executed and 21.3 M model steps in total): from iteration ~190
+  on both groups stand 9.5-10 s.  The policy alone (`rl/stand/evaluate.py`, 128 robots): 11.7 % falls with pushes and
+  noise, 0 % without.  **Gate passed.**  Settings that worked: `--robots 64 --candidates 8 --horizon 5 --sigma 0.2`
+  (a short horizon is enough once the value is learned; many world robots matter more than many candidates).
+- Open questions for the long run: does it reach PPO's 0 % falls and 2 W?  The energy term of the reward is the same
+  for both arms, so the gap should close with training; if it does not, look at `sigma` (the planner's noise is also
+  what the policy imitates) and at lowering it over the run.
 - Trap: do not stop a run with `pkill -f mbrl.mpc.train` from the same shell line that mentions it; it kills the
   shell too. Use the process id.
 
 ### Package 5: stage 1 result (small; ~6 h of Kaggle)
-- Do: a Kaggle task `mb-stand` in `kaggle/train_mb.py` and `kaggle/common.sh` (as `kick-track` was added), run
-  `mb-stand-v1`; `mbrl/compare.py` prints the table for two policy files (quality, falls, watts, executed and
+- Do: `TASK=mb-stand kaggle/run.sh HOURS=6 RUN_NAME=mb-stand-v1` (the task exists in `kaggle/train_mb.py`: 256 world
+  robots x 8 x 5; W&B project "Akos pH MB"), then `KERNEL_SLUG=mbrl-k1-mb-stand TASK=mb-stand kaggle/fetch.sh mb-stand-v1`; `mbrl/compare.py` prints the table for two policy files (quality, falls, watts, executed and
   simulated steps); also `Full Body/rl/stand/eval_mujoco.py` for both.
 - Done when: the comparison table of stage 1 is in this file. If the model-based policy is clearly worse, fix the
   learner before any later stage: it is the same learner everywhere.

@@ -22,6 +22,7 @@ kaggle/run.sh overrides the settings below:
     TASK=kick-plan kaggle/run.sh HOURS=2                      # the kick planner (mbrl.kick.plan) -> plans/ in the output
     TASK=kick-track kaggle/run.sh HOURS=6                     # DAgger + PPO on the committed kick library (KICK_PLAN)
     TASK=kick-mbrl kaggle/run.sh HOURS=8                      # both in one session
+    TASK=mb-stand kaggle/run.sh HOURS=6 RUN_NAME=mb-stand-v1  # the model-based learner (mbrl.mpc) on standing
 
 The kick tasks: kick-plan runs `python -m mbrl.kick.plan` (CEM over the kick plan of mbrl/kick/controller.py, one
 search per ball speed in KICK_SPEEDS, through the walk policy WALK), kick-track runs `python -m mbrl.kick.train --plan
@@ -81,6 +82,10 @@ KICK_FIT = ""                             # a fit made on the standard robot mod
                                           # was made on the older hand model: not for the kick)
 WALK = "policies/walk_teacher.pt"         # the walk policy the kick plan acts through (TorchScript, 75 -> 22)
 KICK_WANDB_PROJECT = "Akos pH Kick MBRL"
+MB_ROBOTS = 256                           # mb-*: world robots of the model-based learner (mbrl.mpc)
+MB_CANDIDATES = 8                         # mb-*: model copies per world robot
+MB_HORIZON = 5                            # mb-*: planner steps of 20 ms
+MB_WANDB_PROJECT = "Akos pH MB"
 RESUME = ""                               # W&B run (name or id) in WANDB_PROJECT to continue from; "" = fresh
 SESSION_HOURS = 11.0                      # our own cap, 1 h under Kaggle's 12 h (kaggle/run.sh pushes with the same
                                           # timeout): the kernel never runs into Kaggle's limit
@@ -93,7 +98,8 @@ TASK_DEFAULTS = {"stand": {"iterations": 3000, "video_every": 500, "video_every_
                  "getup-mbrl": {"iterations": 100000, "video_every": 0, "video_every_min": 30.0},
                  "kick-plan": {"iterations": 0, "video_every": 0, "video_every_min": 0.0},
                  "kick-track": {"iterations": 100000, "video_every": 0, "video_every_min": 30.0},
-                 "kick-mbrl": {"iterations": 100000, "video_every": 0, "video_every_min": 30.0}}
+                 "kick-mbrl": {"iterations": 100000, "video_every": 0, "video_every_min": 30.0},
+                 "mb-stand": {"iterations": 1000000, "video_every": 0, "video_every_min": 30.0}}
 REPO = "https://github.com/akuduku/K1-Model-Based-RL.git"
 WORK = Path("/kaggle/working")
 SRC = Path("/tmp/mbrl")
@@ -185,10 +191,10 @@ def reachable(host):
 def main():
     LOGS.mkdir(parents=True, exist_ok=True)
     if TASK not in TASK_DEFAULTS:
-        raise SystemExit(f"TASK={TASK!r}: stand, getup, getup-plan, getup-track, getup-mbrl, kick-plan, kick-track "
-                         "or kick-mbrl")
+        raise SystemExit(f"TASK={TASK!r}: stand, getup, getup-plan, getup-track, getup-mbrl, kick-plan, kick-track, "
+                         "kick-mbrl or mb-stand")
     d = TASK_DEFAULTS[TASK]
-    run_name = RUN_NAME or (f"{TASK}-v1" if TASK.startswith(("getup-", "kick-")) else f"{TASK}-mb-v1")
+    run_name = RUN_NAME or (f"{TASK}-v1" if TASK.startswith(("getup-", "kick-", "mb-")) else f"{TASK}-mb-v1")
     project = KICK_WANDB_PROJECT if TASK.startswith("kick-") else WANDB_PROJECT
     iterations = ITERATIONS or d["iterations"]
     video_every = d["video_every"] if VIDEO_EVERY < 0 else VIDEO_EVERY
@@ -289,7 +295,14 @@ def main():
         if code:
             raise SystemExit(f"{what} failed (exit code {code}), see logs/train.log")
 
-    if TASK == "kick-plan":
+    if TASK.startswith("mb-"):
+        # the model-based learner: plan in the pH model, learn policy and value; resume = a checkpoint path in the repo
+        go([py, "-m", "mbrl.mpc.train", TASK[3:], "--run-name", run_name, "--robots", MB_ROBOTS,
+            "--candidates", MB_CANDIDATES, "--horizon", MB_HORIZON, "--sigma", 0.2, "--minutes", f"{max(budget, 1):.1f}",
+            "--save-every-min", SAVE_EVERY_MIN, "--eval-every-min", 20, "--eval-robots", 128,
+            "--video-every-min", video_every_min, "--log-root", WORK / "runs", "--wandb-project", MB_WANDB_PROJECT,
+            "--wandb-entity", WANDB_ENTITY, *(["--resume", RESUME] if RESUME else []), *TRAIN_ARGS.split()], "training")
+    elif TASK == "kick-plan":
         go(kick_plan_cmd(run_name, budget), "planning")
     elif TASK == "kick-track":
         go(kick_track_cmd(run_name, budget, KICK_PLAN), "training")
