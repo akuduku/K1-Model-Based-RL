@@ -90,6 +90,7 @@ MB_HORIZON = 5                            # mb-*: planner steps of 20 ms
 GRAD_ROBOTS = 256                         # grad-stand: robots of the gradient learner (mbrl.grad.train); set from grad-bench
 GRAD_STEPS = 20                           # grad-stand: control steps per window
 GRAD_DEVICE = "cuda"                      # grad-stand: where the Python pH plant runs
+GRAD_BENCH_ROBOTS = "64,256,1024"         # grad-bench: robots per row
 GRAD_DTYPE = "float32"                    # grad-stand
 MB_WANDB_PROJECT = "Akos pH MB"
 RESUME = ""                               # W&B run (name or id) in WANDB_PROJECT to continue from; "" = fresh
@@ -304,10 +305,10 @@ def main():
             raise SystemExit(f"{what} failed (exit code {code}), see logs/train.log")
 
     if TASK == "grad-bench":
-        # how fast is a gradient through the Python pH plant on this machine: the T4 first, then the CPU
-        go([py, "-u", "-m", "mbrl.grad.bench", "--devices", "cuda", "--robots", 64, 256, 1024, 2048, "--steps", 3],
-           "benchmark (GPU)")
-        go([py, "-u", "-m", "mbrl.grad.bench", "--devices", "cpu", "--robots", 64, 256, "--steps", 2], "benchmark (CPU)")
+        # how fast is a gradient through the Python pH plant on the T4 (16 Nov on the kernel's CPU, 2 threads, float32:
+        # 64 robots 24 and 256 robots 38 robot-control-steps per second)
+        go([py, "-u", "-m", "mbrl.grad.bench", "--devices", "cuda", "--robots", *str(GRAD_BENCH_ROBOTS).split(","),
+            "--dtypes", "float32", "--steps", 2, "--trace"], "benchmark (GPU)")
     elif TASK == "grad-stand":
         # the professor's formula: standing from scratch with derivatives of the cost through the pH model
         go([py, "-u", "-m", "mbrl.grad.train", "--run-name", run_name, "--robots", GRAD_ROBOTS, "--steps", GRAD_STEPS,

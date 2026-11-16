@@ -13,8 +13,14 @@ the peak memory.  The numbers set the sizes of the training run (mbrl.grad.train
 from __future__ import annotations
 
 import argparse
+import os
 import resource
+import sys
 import time
+import traceback
+
+if "--trace" in sys.argv:   # before CUDA starts: errors are then reported at the operation that caused them
+    os.environ.setdefault("CUDA_LAUNCH_BLOCKING", "1")
 
 import torch
 
@@ -57,6 +63,7 @@ def main():
     ap.add_argument("--dtypes", nargs="+", default=["float32", "float64"])
     ap.add_argument("--steps", type=int, default=3, help="control steps per measurement")
     ap.add_argument("--threads", type=int, default=0)
+    ap.add_argument("--trace", action="store_true", help="print the traceback of a failing row (and run CUDA blocking)")
     args = ap.parse_args()
     if args.threads:
         torch.set_num_threads(args.threads)
@@ -73,6 +80,8 @@ def main():
                           f"{m['mem_GiB']:10.2f}  {'yes' if m['finite'] else 'NOT FINITE'}", flush=True)
                 except Exception as exc:  # noqa: BLE001  (out of memory on the larger rows is an answer too)
                     print(f"{device:6s} {name:8s} {robots:6d}  failed: {type(exc).__name__}: {str(exc)[:90]}", flush=True)
+                    if args.trace:
+                        print("".join(traceback.format_exc().splitlines(keepends=True)[-14:]), flush=True)
                     if device.startswith("cuda"):
                         torch.cuda.empty_cache()
     print("CPU memory is the process's peak so far (it never goes down); GPU memory is per row.", flush=True)
