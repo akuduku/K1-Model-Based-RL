@@ -23,6 +23,7 @@ kaggle/run.sh overrides the settings below:
     TASK=kick-track kaggle/run.sh HOURS=6                     # DAgger + PPO on the committed kick library (KICK_PLAN)
     TASK=kick-mbrl kaggle/run.sh HOURS=8                      # both in one session
     TASK=mb-stand kaggle/run.sh HOURS=6 RUN_NAME=mb-stand-v1  # the model-based learner (mbrl.mpc) on standing
+    TASK=grad-bench kaggle/run.sh HOURS=1                     # speed of gradients through the pH plant (mbrl.grad.bench)
 
 The kick tasks: kick-plan runs `python -m mbrl.kick.plan` (CEM over the kick plan of mbrl/kick/controller.py, one
 search per ball speed in KICK_SPEEDS, through the walk policy WALK), kick-track runs `python -m mbrl.kick.train --plan
@@ -99,7 +100,9 @@ TASK_DEFAULTS = {"stand": {"iterations": 3000, "video_every": 500, "video_every_
                  "kick-plan": {"iterations": 0, "video_every": 0, "video_every_min": 0.0},
                  "kick-track": {"iterations": 100000, "video_every": 0, "video_every_min": 30.0},
                  "kick-mbrl": {"iterations": 100000, "video_every": 0, "video_every_min": 30.0},
-                 "mb-stand": {"iterations": 1000000, "video_every": 0, "video_every_min": 30.0}}
+                 "mb-stand": {"iterations": 1000000, "video_every": 0, "video_every_min": 30.0},
+                 "grad-bench": {"iterations": 0, "video_every": 0, "video_every_min": 0.0},
+                 "grad-stand": {"iterations": 1000000, "video_every": 0, "video_every_min": 0.0}}
 REPO = "https://github.com/akuduku/K1-Model-Based-RL.git"
 WORK = Path("/kaggle/working")
 SRC = Path("/tmp/mbrl")
@@ -192,7 +195,7 @@ def main():
     LOGS.mkdir(parents=True, exist_ok=True)
     if TASK not in TASK_DEFAULTS:
         raise SystemExit(f"TASK={TASK!r}: stand, getup, getup-plan, getup-track, getup-mbrl, kick-plan, kick-track, "
-                         "kick-mbrl or mb-stand")
+                         "kick-mbrl, mb-stand, grad-bench or grad-stand")
     d = TASK_DEFAULTS[TASK]
     run_name = RUN_NAME or (f"{TASK}-v1" if TASK.startswith(("getup-", "kick-", "mb-")) else f"{TASK}-mb-v1")
     project = KICK_WANDB_PROJECT if TASK.startswith("kick-") else WANDB_PROJECT
@@ -295,7 +298,12 @@ def main():
         if code:
             raise SystemExit(f"{what} failed (exit code {code}), see logs/train.log")
 
-    if TASK.startswith("mb-"):
+    if TASK == "grad-bench":
+        # how fast is a gradient through the Python pH plant on this machine: the T4 first, then the CPU
+        go([py, "-u", "-m", "mbrl.grad.bench", "--devices", "cuda", "--robots", 64, 256, 1024, 2048, "--steps", 3],
+           "benchmark (GPU)")
+        go([py, "-u", "-m", "mbrl.grad.bench", "--devices", "cpu", "--robots", 64, 256, "--steps", 2], "benchmark (CPU)")
+    elif TASK.startswith("mb-"):
         # the model-based learner: plan in the pH model, learn policy and value; resume = a checkpoint path in the repo
         go([py, "-m", "mbrl.mpc.train", TASK[3:], "--run-name", run_name, "--robots", MB_ROBOTS,
             "--candidates", MB_CANDIDATES, "--horizon", MB_HORIZON, "--sigma", 0.2, "--minutes", f"{max(budget, 1):.1f}",
