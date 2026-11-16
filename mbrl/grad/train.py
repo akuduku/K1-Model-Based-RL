@@ -23,6 +23,7 @@ Writes <log-root>/<run-name>/model_<it>.pt (rsl-rl's layout), deploy_<it>.bin (t
 from __future__ import annotations
 
 import argparse
+import gc
 import json
 import os
 import signal
@@ -124,6 +125,7 @@ def main():
     ap.add_argument("--log-root", default=str(paths.REPO / "logs"))
     ap.add_argument("--no-wandb", action="store_true")
     ap.add_argument("--wandb-project", default="Akos pH MB")
+    ap.add_argument("--fake-oom", action="store_true", help=argparse.SUPPRESS)   # test of the out-of-memory path
     ap.add_argument("--wandb-entity", default=os.environ.get("WANDB_ENTITY", "karl-jahnel-universit-t-leipzig"))
     args = ap.parse_args()
     if args.threads:
@@ -135,7 +137,11 @@ def main():
     (run_dir / "config.json").write_text(json.dumps(vars(args), indent=1))
 
     world = {} if args.quiet else {"obs_noise": OBS_NOISE, "push_dv": 0.3, "delay_ms": (10.0, 70.0)}
-    env = GradStand(args.robots, seed=args.seed, device=args.device, dtype=dtype, checkpoint=not args.no_checkpoint, **world)
+
+    def make_env(robots: int) -> GradStand:
+        return GradStand(robots, seed=args.seed, device=args.device, dtype=dtype, checkpoint=not args.no_checkpoint, **world)
+
+    env = make_env(args.robots)
     policy = MLP(C.OBS_DIM, NA, last_scale=0.01).to(device=args.device, dtype=dtype)
     value = MLP(C.OBS_DIM + 6, 1)       # not used by this learner; kept in the file so the layout is rsl-rl's
     opt = torch.optim.Adam(policy.mlp.parameters(), lr=args.lr)
@@ -193,7 +199,31 @@ def main():
         try:
             while iteration < args.iterations and stop["why"] is None:
                 t_it = time.time()
-                w = window(env, policy, args, age)
+                # Memory grows with robots x window length (measured 16 Nov: about 11 MB per robot for the control
+                # step being differentiated plus about 1.5 MB per robot and window step).  If the GPU runs out,
+                # go on with half the robots instead of losing the run.
+                out_of_memory = False
+                try:
+                    if args.fake_oom:
+                        args.fake_oom = False
+                        raise torch.OutOfMemoryError("test")
+                    w = window(env, policy, args, age)
+                except torch.OutOfMemoryError:
+                    out_of_memory = True
+                if out_of_memory:        # cleaned up outside the except block: the traceback holds the window's tensors
+                    if args.robots <= 16:
+                        raise SystemExit("out of memory even with 16 robots")
+                    for p in policy.parameters():
+                        p.grad = None
+                    env = None
+                    gc.collect()
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                    args.robots //= 2
+                    print(f"[grad] out of memory: continuing with {args.robots} robots", flush=True)
+                    env = make_env(args.robots)
+                    age = torch.rand(args.robots, device=env.device) * max_age
+                    continue
                 g = w["g"]
                 delta = args.delta
                 if args.delta_final is not None and budget > 0:    # smaller steps towards the end of the run

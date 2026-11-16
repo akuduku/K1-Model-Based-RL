@@ -13,8 +13,9 @@ when a package is finished.
 - **It works on standing:** from a random network, 16 robots, 41 min on one laptop core, 23 680 environment steps:
   2.3 % falls / 2.8 W with pushes and noise, 0 % / 0.9 W quiet; stands in MuJoCo.  One seed, unsteady between
   updates.  PPO on pH: 0 % / 2.1 W after 295 M steps.
-- **Running:** Kaggle `grad-stand-v1` (512 robots on the T4, 6 h, started 16 Nov 22:47).  Fetch:
-  `KERNEL_SLUG=mbrl-k1-grad-stand TASK=grad-stand kaggle/fetch.sh grad-stand-v1`.
+- **Running:** Kaggle `grad-stand-v1b` (256 robots on the T4, 6 h, started 16 Nov about 23:20; the first try with
+  512 robots ran out of GPU memory).  Fetch:
+  `KERNEL_SLUG=mbrl-k1-grad-stand TASK=grad-stand kaggle/fetch.sh grad-stand-v1b`.
 - **Next:** the roadmap W1-W6 at the end of this file (stand solid, the walk task, a learned term 2, speed, walk and
   run, kick).
 - The planner (`mbrl/mpc`, packages 3-5 below) and PPO on pH are **comparison rows** now, not the thesis method.
@@ -332,9 +333,15 @@ so autograd runs through it **without any change to the plant**.
   with gradient / GPU memory): 64 robots 19.9 / 0.9 GiB; 256 robots 66.9 / 3.6 GiB; 1024 robots 154.7 / 14.2 GiB
   (too close to the T4's 15 GiB).  Memory is about 14 MB per robot, so 512 robots need about 7 GiB (not measured).
   For comparison: the C++ plant runs about 11 600 steps per second forwards on the same GPU.
-- Launched on 16 Nov, 22:45: `TASK=grad-stand kaggle/run.sh HOURS=6 RUN_NAME=grad-stand-v1 GRAD_DEVICE=cuda
-  GRAD_ROBOTS=512` (window 20, delta 0.05 -> 0.01, W&B "Akos pH MB").  Fetch:
-  `KERNEL_SLUG=mbrl-k1-grad-stand TASK=grad-stand kaggle/fetch.sh grad-stand-v1`.
+- **Memory grows with the window after all.**  `grad-stand-v1` (512 robots, window 20) ran out of the T4's memory
+  in its first backward pass: the benchmark had measured with a window of 2.  Measured on the laptop afterwards
+  (float32): about 1.5 MB per robot and window step stay allocated on top of the block being differentiated
+  (about 11 MB per robot).  So a window of 20 needs about 40 MB per robot: about 256 robots on a T4.  Why PyTorch's
+  checkpoint keeps that much per step is not understood yet; finding it would allow more robots (W4).
+  `train.py` now halves the robots and goes on when the GPU runs out (`--fake-oom` tests that path).
+- Relaunched 16 Nov, about 23:20: `TASK=grad-stand kaggle/run.sh HOURS=6 RUN_NAME=grad-stand-v1b GRAD_DEVICE=cuda
+  GRAD_ROBOTS=256` (window 20, delta 0.05 -> 0.01, W&B "Akos pH MB").  Fetch:
+  `KERNEL_SLUG=mbrl-k1-grad-stand TASK=grad-stand kaggle/fetch.sh grad-stand-v1b`.
 - Ways to more speed, in this order: the T4 with many robots; sole contacts only and 2 ms steps in the gradient
   plant; derivative code in the C++/CUDA plant (the large work package).
 
@@ -351,7 +358,7 @@ push and its result in this file.
 neither breaks nor blows up the derivative.  Not covered by this: repeated steps, sliding feet, the ball.
 
 ### W1: standing, solid
-- Fetch and score `grad-stand-v1` (command in "Start here"): the best in-run checkpoint with
+- Fetch and score `grad-stand-v1b` (command in "Start here"): the best in-run checkpoint with
   `Full Body/rl/stand/evaluate.py --policy <deploy.bin> -B 128` (with and without `--quiet`) and
   `rl/stand/eval_mujoco.py --seconds 20` (quiet and `--push 0.3`).  Add the row to the table above.
 - Two more seeds: the same Kaggle command with `TRAIN_ARGS="--seed 2"` and `"--seed 3"`, other run names.
