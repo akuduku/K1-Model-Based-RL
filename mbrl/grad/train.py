@@ -96,6 +96,8 @@ def main():
     ap.add_argument("--robots", type=int, default=8)
     ap.add_argument("--steps", type=int, default=20, help="control steps per window (K)")
     ap.add_argument("--delta", type=float, default=0.05, help="RMS change of the action targets per update (action units)")
+    ap.add_argument("--delta-final", type=float, default=None,
+                    help="shrink delta (and the learning rate with it) linearly to this over the time budget")
     ap.add_argument("--clip", type=float, default=3.0, help="one robot's action gradient at most this x the batch median")
     ap.add_argument("--regress", type=int, default=8, help="fitting steps of the network onto the action targets")
     ap.add_argument("--lr", type=float, default=3e-4)
@@ -193,7 +195,13 @@ def main():
                 t_it = time.time()
                 w = window(env, policy, args, age)
                 g = w["g"]
-                target = w["act"] + args.delta * g / g.square().mean().sqrt().clamp_min(1e-30)
+                delta = args.delta
+                if args.delta_final is not None and budget > 0:    # smaller steps towards the end of the run
+                    done = min(1.0, (time.time() - t0) / (60 * budget))
+                    delta = args.delta + done * (args.delta_final - args.delta)
+                    for group in opt.param_groups:
+                        group["lr"] = args.lr * delta / args.delta
+                target = w["act"] + delta * g / g.square().mean().sqrt().clamp_min(1e-30)
                 obs_b, target_b = w["obs"].flatten(0, 1), target.flatten(0, 1)
                 policy.obs_normalizer.update(obs_b)
                 loss = torch.zeros(())
@@ -214,7 +222,7 @@ def main():
                 env_steps += args.robots * args.steps
                 now = time.time()
                 row = {"iteration": iteration, "Cost/executed_steps": env_steps, "Cost/seconds": now - t_it,
-                       "Learn/fit_loss": float(loss), **{f"Grad/{k}": v for k, v in w["stats"].items()}}
+                       "Learn/fit_loss": float(loss), "Learn/delta": delta, **{f"Grad/{k}": v for k, v in w["stats"].items()}}
                 if evaluate is not None and args.eval_every_min > 0 and (now - last["eval"]) / 60 >= args.eval_every_min:
                     try:
                         row.update({k: float(v) for k, v in evaluate(act, iteration).items()})

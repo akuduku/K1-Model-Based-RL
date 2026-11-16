@@ -312,7 +312,7 @@ def main():
     elif TASK == "grad-stand":
         # the professor's formula: standing from scratch with derivatives of the cost through the pH model
         go([py, "-u", "-m", "mbrl.grad.train", "--run-name", run_name, "--robots", GRAD_ROBOTS, "--steps", GRAD_STEPS,
-            "--device", GRAD_DEVICE, "--dtype", GRAD_DTYPE, "--minutes", f"{max(budget, 1):.1f}",
+            "--device", GRAD_DEVICE, "--dtype", GRAD_DTYPE, "--minutes", f"{max(budget, 1):.1f}", "--delta-final", 0.01,
             "--save-every-min", SAVE_EVERY_MIN, "--eval-every-min", 20, "--eval-robots", 128,
             "--log-root", WORK / "runs", "--wandb-project", MB_WANDB_PROJECT, "--wandb-entity", WANDB_ENTITY,
             *(["--resume", RESUME] if RESUME else []), *TRAIN_ARGS.split()], "training")

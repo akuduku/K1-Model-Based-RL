@@ -108,10 +108,14 @@ Reference rows for stage 1 (`python rl/stand/evaluate.py --policy <file> -B 128`
 | PPO `stand-ph-v1` (`deploy_2999.bin`, 295 M executed steps) | 0 % | 10.0 s | 2.1 W | 0.33° |
 | model-based, laptop (`policies/mb-stand-laptop3_346.bin`, 0.53 M executed + 21 M model steps, 85 min on 6 CPU cores) | 11.7 % | 9.65 s | 14.4 W | 2.5° |
 
+| **professor's formula, from scratch on the laptop** (`policies/grad-stand-laptop_74.bin`: gradients through the pH model, 16 robots, 23 680 environment steps, 41 min on one CPU core; one seed) | **2.3 %** | 9.94 s | **2.8 W** | 0.68° |
+| the same run at update 41 (`policies/grad-stand-laptop_41.bin`, 13 120 steps, 20 min) | 6.2 % | 9.86 s | 2.5 W | 0.73° |
+| planner with the fix of 16 Nov (`policies/mb-stand-s05_392.bin`, from `mb-stand-v1`'s best + 50 min laptop) | 5.5 % | 9.87 s | 6.8 W | 0.99° |
 | model-based, Kaggle `mb-stand-v1`, best checkpoint (`policies/mb-stand-v1_260.bin`, 1.6 M executed + 64 M model steps, 2.2 h on a T4) | 2.3 % | 9.94 s | 14.0 W | 1.3° |
 | model-based, Kaggle `mb-stand-v1`, end of the run (`policies/mb-stand-v1_708.bin`, 4.35 M executed + 174 M model steps, 6 h) | 10.2 % | 9.73 s | 24.6 W | 2.1° |
 
-Without pushes and noise (`--quiet`): PPO 0 % falls, 1.0 W; model-based 0 % falls at 13.3 W (best) and 20.9 W (end).
+Without pushes and noise (`--quiet`): PPO 0 % falls, 1.0 W; professor's formula 0 % falls, 0.9 W (update 74) and
+0.8 W (update 41); planner with the fix 0 %, 5.3 W; model-based 0 % falls at 13.3 W (best) and 20.9 W (end).
 In MuJoCo (`rl/stand/eval_mujoco.py --seconds 20`, quiet and `--push 0.3`): all three stand the 20 s; largest tilt
 PPO 0.4° / 0.7°, model-based best 3.9° / 3.9°, model-based end 1.5° / 2.1°.
 
@@ -289,9 +293,22 @@ so autograd runs through it **without any change to the plant**.
 - `python -m mbrl.grad.train` = standing **from scratch** with this method (the world of the other rows, scoring on
   the C++ plant).  Kaggle tasks: `TASK=grad-bench kaggle/run.sh HOURS=1` (speed and memory, GPU against CPU; run
   it first, its numbers set `GRAD_ROBOTS`), `TASK=grad-stand kaggle/run.sh HOURS=6 RUN_NAME=grad-stand-v1`.
-- Speed, measured on the laptop: about 4 robot-control-steps per second with gradient (one thread).  Ways up, in
-  this order: the T4 with many robots (to be measured by `grad-bench`); sole contacts only and 2 ms steps in the
-  gradient plant; derivative code in the C++/CUDA plant (the large work package).
+- **First result from scratch (16 Nov, `grad-scratch-laptop`):** `python -m mbrl.grad.train --robots 16 --steps 20
+  --threads 1 --minutes 40 --eval-every-min 10 --eval-robots 64 --no-wandb` on the laptop: a random network, the
+  world with noise, pushes and delays, 74 updates, 23 680 environment steps, 40.8 min.  In-run evaluation
+  (C++ plant, 64 robots): update 21: 26.6 % falls with pushes, quiet 0 % / 1.25 W; update 41: 3.1 %, 2.5 W, quiet
+  0.86 W; update 61: 26.6 %, 6.1 W (worse again: 16 robots make noisy updates); update 74: 4.7 %, 2.8 W.
+  Scored like the other rows (128 robots): see the table at the top of this file.  In MuJoCo
+  (`eval_mujoco.py --seconds 20`): stands quiet (largest tilt 1.0 deg) and with `--push 0.3` (1.6 deg).
+  **One seed, one run; not steady from update to update.  Next: more robots per update and a shrinking step
+  (`--delta-final`), 3 seeds.**
+- Speed: laptop, one thread: about 10 robot-control-steps per second with gradient (16 robots, 30 s per update).
+  Kaggle CPU (2 threads, float32, `grad-bench` of 16 Nov): 64 robots 24.5, 256 robots 38.5 robot-steps/s, 3.5 GiB.
+  Kaggle T4: failed at first: PyTorch 2.11+cu130 has no GPU code for batched `torch.linalg.solve` on a T4
+  ("no kernel image").  Since Full Body e135c25 the plant's solves go through `ph_k1/solve.py`, which solves on the
+  CPU when the GPU cannot (`probe`); result of the benchmark with it: see below.
+- Ways to more speed, in this order: the T4 with many robots; sole contacts only and 2 ms steps in the gradient
+  plant; derivative code in the C++/CUDA plant (the large work package).
 
 ### Package 6: walking, both arms (medium + ~7 h of Kaggle per run)
 - Do: `Full Body/rl/walk/{env,train,evaluate}.py`: Eric's walk task and rewards on the pH plant, ported from
