@@ -1,8 +1,26 @@
-# Thesis experiments: model-based RL on the pH plant, against the team's PPO in MuJoCo
+# Thesis experiments: the professor's formula on the pH plant, against the team's PPO in MuJoCo
 
 This file is the working plan of the thesis experiments: the rules, what exists, and the next work packages. Each
 package has a goal, the files it touches, what to reuse, and a check that says it is done. Update the status tables
 when a package is finished.
+
+## Start here (state of 16 Nov 2026, night)
+
+- **The thesis method** (decided by the user on 16 Nov): the professor's formula as written
+  (`MA/ph_formula_rl_mbrl.pdf`): minimise L = running cost (term 1) + cost at the end (term 2) over the
+  controller's weights, with the derivative taken **through the pH model**.  Code: `mbrl/grad/`.  Details, numbers
+  and traps: section "Gradients through the pH model".
+- **It works on standing:** from a random network, 16 robots, 41 min on one laptop core, 23 680 environment steps:
+  2.3 % falls / 2.8 W with pushes and noise, 0 % / 0.9 W quiet; stands in MuJoCo.  One seed, unsteady between
+  updates.  PPO on pH: 0 % / 2.1 W after 295 M steps.
+- **Running:** Kaggle `grad-stand-v1` (512 robots on the T4, 6 h, started 16 Nov 22:47).  Fetch:
+  `KERNEL_SLUG=mbrl-k1-grad-stand TASK=grad-stand kaggle/fetch.sh grad-stand-v1`.
+- **Next:** the roadmap W1-W6 at the end of this file (stand solid, the walk task, a learned term 2, speed, walk and
+  run, kick).
+- The planner (`mbrl/mpc`, packages 3-5 below) and PPO on pH are **comparison rows** now, not the thesis method.
+- Commands: tests `scripts/test_all.sh`; Kaggle runs are started by the user (`kaggle/run.sh`, commit and push
+  first); Python: `~/Dokumente/Robotics/venv/bin/python`; on the laptop one gradient job at a time (7 GB of memory)
+  and `--threads 1`.
 
 ## The question and the rules
 
@@ -12,11 +30,13 @@ apart everywhere: in the names, the tables and the code.
 
 | Row | Physics | Learning | Whose | Role |
 |---|---|---|---|---|
-| **Thesis approach** | pH plant (Full Body, fitted to robot logs with `mbrl/fit.py`) | model-based: at every control step a planner looks a short time ahead in the pH model; a policy network and a value network learn together with it (`mbrl/mpc`) | this thesis | the result |
+| **Thesis approach** | pH plant (Full Body, fitted to robot logs with `mbrl/fit.py`) | the professor's formula: the cost is minimised over the controller's weights with derivatives through the pH model (`mbrl/grad`) | this thesis | the result |
 | **Baseline** | MuJoCo | model-free PPO (rsl-rl) | the team (Eric's policies and training) | what the thesis is measured against; never a part of the thesis approach |
-| Ablation: PPO on pH | pH plant | model-free PPO (Full Body `rl/<skill>/train.py`) | this thesis | separates the two changes: is a difference due to the physics (pH instead of MuJoCo) or to the learning (planning instead of PPO)? |
+| Ablation: PPO on pH | pH plant | model-free PPO (Full Body `rl/<skill>/train.py`) | this thesis | is a difference due to the physics (pH instead of MuJoCo)? |
+| Ablation: planner on pH | pH plant | at every control step a planner tries variations in the pH model; policy and value learn with it (`mbrl/mpc`); the model is a black box | this thesis | is a difference due to using the model's derivatives? |
 
-In this file "model-based arm" = the thesis approach, "PPO arm" = the ablation (PPO on pH) unless MuJoCo is named.
+In the older sections of this file (packages 3-5) "model-based arm" means the planner, which was the thesis
+approach until 16 Nov; "PPO arm" = PPO on pH unless MuJoCo is named.
 
 The question: does model-based RL on the pH model reach the quality of the team's PPO-in-MuJoCo policies, on the pH
 plant, in MuJoCo and on the robot, and at what cost (environment steps, model steps, hours)?  "It does not" is a
@@ -47,10 +67,12 @@ walk policy and can start from his kick motion) is a **reference**, not the mode
 
 | Stage | Skill | Agent contract | PPO arm | Model-based arm |
 |---|---|---|---|---|
-| 1 | stand under pushes | firmware `stand`, 72 -> 22 (`rl/stand`) | done: `stand-ph-v1` (3000 iterations, ~295 M steps, 7 h on a T4, no falls) | open (packages 3-5) |
-| 2 | walk on velocity commands, standing included | sprint family, 75 -> 22 | open (package 6) | open (package 6) |
-| 3 | kick from standing | kick_walk, 165 (166 with the request clock) -> 22 | open (package 7) | open (package 7) |
-| 4 | walk, stay and kick | kick_walk | open (package 7) | open (package 7) |
+| 1 | stand under pushes | firmware `stand`, 72 -> 22 (`rl/stand`) | done: `stand-ph-v1` (3000 iterations, ~295 M steps, 7 h on a T4, no falls) | planner: `mb-stand-v1` + fix (6.8 W, 5.5 % falls); **thesis method: first result on the laptop, `grad-stand-v1` running (W1)** |
+| 2 | walk on velocity commands, standing included; run = higher commands | sprint family, 75 -> 22 | open (W2, W5) | open (W2-W5) |
+| 3 | kick from standing | kick_walk, 165 (166 with the request clock) -> 22 | open (W6) | open (W6) |
+| 4 | walk, stay and kick | kick_walk | open (W6) | open (W6) |
+
+(The last column is the thesis approach; until 16 Nov it was the planner.)
 
 Stage 1 tests the method on its own. Stages 2-4 share one contract family: the walk's 75 inputs are the first 75 of
 kick_walk, so a network continues from the previous stage with its new inputs at zero weight.
@@ -315,6 +337,64 @@ so autograd runs through it **without any change to the plant**.
   `KERNEL_SLUG=mbrl-k1-grad-stand TASK=grad-stand kaggle/fetch.sh grad-stand-v1`.
 - Ways to more speed, in this order: the T4 with many robots; sole contacts only and 2 ms steps in the gradient
   plant; derivative code in the C++/CUDA plant (the large work package).
+
+## Roadmap after standing (written 16 Nov; for the thesis method `mbrl/grad`)
+
+Order of the skills: stand -> walk -> run (the walk task with higher commanded speeds) -> kick from standing -> walk
+and kick.  Only standing exists on the differentiable plant.  Each package ends with the tests green, a commit, a
+push and its result in this file.
+
+### W0: is the derivative right when a foot lands?  **Done 16 Nov: yes.**
+`python -m mbrl.grad.check --steps 5 20 --drop 0.02`: the robot starts 2 cm above the floor and lands after about
+64 ms, inside the window.  Autograd against finite differences: worst relative error 6.6e-8 (5 control steps) and
+2.8e-8 (20 steps); gradient norm 9.3 and 14.2, the same size as in a quiet stand (6.8 and 17).  So one landing
+neither breaks nor blows up the derivative.  Not covered by this: repeated steps, sliding feet, the ball.
+
+### W1: standing, solid
+- Fetch and score `grad-stand-v1` (command in "Start here"): the best in-run checkpoint with
+  `Full Body/rl/stand/evaluate.py --policy <deploy.bin> -B 128` (with and without `--quiet`) and
+  `rl/stand/eval_mujoco.py --seconds 20` (quiet and `--push 0.3`).  Add the row to the table above.
+- Two more seeds: the same Kaggle command with `TRAIN_ARGS="--seed 2"` and `"--seed 3"`, other run names.
+- Done when: three seeds in the table.  Target: falls with pushes near 0 %, power near 2 W, no swing back between
+  evaluations (the laptop run swung between 3 % and 27 %).
+
+### W2: the walk task, once, for both plants
+- `Full Body/rl/walk/env.py` on the C++ plant (for scoring and for the comparison rows) and
+  `Model Based RL/mbrl/grad/walk_env.py` on the Python plant (differentiable), built like `rl/stand/env.py` and
+  `mbrl/grad/env.py: GradStand` (functional `_advance` for the checkpoint blocks; everything a control step reads
+  must come in through its arguments).  Contract: `Full Body/rl/walk/contract.py` (75 inputs -> 22 targets).
+- Rewards: Eric's walk task (`RL_Core/rl_core/envs/k1_skill.py`, `k1_skill_cfg.py`, `k1_sprint/env.py`).  Terms with
+  a derivative (speed tracking, upright, height, smoothness, power) work as they are.  Terms that count contacts
+  (air time, clearance) have none: give them a smooth form or leave them to the learned value.
+- Tests: both envs give the same reward on the same motion; Eric's walk policy (`policies/walk_teacher.pt`) follows
+  a commanded speed in the C++ env (a check of the environment only, never a part of the method).
+- `rl/walk/evaluate.py` (speed error, falls, watts) and a MuJoCo check.
+
+### W3: a learned value in place of the fixed term 2
+- Walking has no fixed goal state at the end of a window.  `mbrl/grad/train.py` gets a value network fitted on the
+  windows (TD(lambda); `mbrl/mpc/learner.py` has the returns) and uses it at the window's end
+  (`mbrl/grad/refine.py --value` shows where it enters).
+- Done when: standing learned with the learned term 2 is as good as with the fixed one (`GradStand.terminal_cost`).
+
+### W4: speed for walking
+- In the gradient plant only: the 8 sole contact points instead of 128 (most of the 14 MB per robot is contact
+  data) and 2 ms plant steps.  Measure with `TASK=grad-bench kaggle/run.sh HOURS=1`.
+- Derivative code in the C++/CUDA plant (`Full Body/ph_k1_cuda/include/ph_k1/step.hpp`, about 800 lines to
+  differentiate by hand and to test against the Python plant) only if walking is too slow after this.
+
+### W5: walk, then run
+- From scratch, commanded speeds growing over the run (stand, slow walk, faster).  Kaggle task `grad-walk` (copy of
+  `grad-stand` in `kaggle/train_mb.py`).  Rows to compare with: PPO on pH, the planner, the team's PPO in MuJoCo.
+
+### W6: kick
+- First the derivative through the ball contact (a check like W0).  The ball's 3x3 solve in the Python plant
+  (`torch.linalg.inv` in `ph_k1/plant.py`) must go through `ph_k1/solve.py`, or the T4 fails on it.
+- `mbrl/grad/kick_env.py` from `Full Body/rl/kick/env.py`: kick from standing first, then walk and kick; every stage
+  starts from this method's own previous stage.
+- The kick's reward comes late (speed and direction of the ball after the foot hit it): longer windows and the
+  learned value of W3.  This is the hardest case for the method; a negative result is possible and is reported.
+
+## Older packages for the comparison rows (PPO on pH and the planner)
 
 ### Package 6: walking, both arms (medium + ~7 h of Kaggle per run)
 - Do: `Full Body/rl/walk/{env,train,evaluate}.py`: Eric's walk task and rewards on the pH plant, ported from

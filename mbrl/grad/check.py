@@ -6,6 +6,7 @@ takes d cost / d targets with autograd and compares it with central finite diffe
 
     python -m mbrl.grad.check --steps 1 5 20
     python -m mbrl.grad.check --steps 5 --push 0.3        # a push at the start: the contact mode changes
+    python -m mbrl.grad.check --steps 5 20 --drop 0.02    # the feet land inside the window
 
 cost = copper energy [J] + tilt_weight x sum of (tilt^2) x dt    (smooth terms of the stand reward)
 """
@@ -63,6 +64,8 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--steps", type=int, nargs="+", default=[1, 5, 20], help="control steps K to test")
     ap.add_argument("--push", type=float, default=0.0, help="sideways trunk speed added before the rollout [m/s]")
+    ap.add_argument("--drop", type=float, default=0.0,
+                    help="start this many metres above the floor: the feet land inside the window (contact switches on)")
     ap.add_argument("--entries", type=int, default=6, help="how many gradient entries to check by finite differences")
     ap.add_argument("--eps", type=float, default=1e-6)
     ap.add_argument("--seed", type=int, default=0)
@@ -79,7 +82,13 @@ def main():
         nu = plant.velocity(kin)
         nu[:, 4] += args.push                                    # body-frame sideways speed of the trunk
         state["p"] = (kin.M @ nu[..., None]).squeeze(-1).detach()
-    print(f"settled: trunk z {float(state['q'][0, 2]):.4f} m, |p| {float(state['p'].norm()):.2e}, push {args.push} m/s")
+    if args.drop:
+        state["q"][:, 2] += args.drop      # lifted, at rest, no contact: lands after sqrt(2 drop / g)
+        state["p"].zero_()
+        state["xi"].zero_()
+    print(f"settled: trunk z {float(state['q'][0, 2]):.4f} m, |p| {float(state['p'].norm()):.2e}, push {args.push} m/s, drop {args.drop} m "
+          f"(lands after about {(2 * args.drop / 9.81) ** 0.5 * 1000:.0f} ms)" if args.drop else
+          f"settled: trunk z {float(state['q'][0, 2]):.4f} m, |p| {float(state['p'].norm()):.2e}, push {args.push} m/s")
 
     for K in args.steps:
         noise = 0.02 * torch.randn(K, 1, NJ, dtype=torch.float64)
