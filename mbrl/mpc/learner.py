@@ -35,6 +35,8 @@ class LearnConfig:
     sigma: float = 0.3            # action noise of the planner's samples (action units)
     beta: float = 0.7             # its correlation from step to step
     temperature: float = 0.5      # MPPI: weights ~ exp((G - max) / (temperature x std G))
+    temperature_abs: float = 0.0  # > 0: weights ~ exp((G - max) / temperature_abs), in reward units
+    center: bool = True           # the planner moves the action only by what its weights prefer
     gamma: float = 0.99
     lam: float = 0.95
     steps: int = 24               # T: control steps per iteration
@@ -65,7 +67,8 @@ class Learner:
         self.opt_p = torch.optim.Adam(self.policy.parameters(), lr=cfg.lr)
         self.opt_v = torch.optim.Adam(self.value.parameters(), lr=cfg.value_lr)
         self.planner = Planner(world, model, self.policy, self.value, cfg.candidates, cfg.horizon, cfg.sigma, cfg.beta,
-                               cfg.gamma, cfg.temperature, after_restore)
+                               cfg.gamma, cfg.temperature, after_restore,
+                               center=cfg.center, temperature_abs=cfg.temperature_abs)
         self.buffer: deque = deque(maxlen=cfg.replay)
         self.iteration, self.executed = 0, 0
         R = world.num_envs
@@ -117,7 +120,7 @@ class Learner:
         world, cfg, R = self.world, self.cfg, self.world.num_envs
         dev = world.device
         O, C, A, Rw, D, TO, V, Corr = [], [], [], [], [], [], [], []
-        stats = {k: [] for k in ("return_policy", "return_planner", "return_best", "weight_entropy")}
+        stats = {k: [] for k in ("return_policy", "return_planner", "return_best", "weight_entropy", "spread")}
         lengths = {"policy": [], "planner": []}   # seconds of the episodes that ended, by who controlled the robot
         env_log: dict = {}
         obs = world.get_observations()

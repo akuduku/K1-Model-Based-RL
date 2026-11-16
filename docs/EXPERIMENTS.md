@@ -1,4 +1,4 @@
-# Thesis experiments: the pH plant as planner against the pH plant as simulator for PPO
+# Thesis experiments: model-based RL on the pH plant, against the team's PPO in MuJoCo
 
 This file is the working plan of the thesis experiments: the rules, what exists, and the next work packages. Each
 package has a goal, the files it touches, what to reuse, and a check that says it is done. Update the status tables
@@ -6,20 +6,22 @@ when a package is finished.
 
 ## The question and the rules
 
-Words, as in Plaat, *Deep Reinforcement Learning* (2022), chapter 5 (checked against it on 16 Nov 2026):
-the **environment** is the real robot; its stand-ins are the pH plant with randomisation, noise and pushes (the
-"world" of a run) and MuJoCo. The **model** is the port-Hamiltonian plant (Full Body), with parameters fitted to
-robot logs (`mbrl/fit.py`). Both arms use this model, so both are model-based in the book's sense; they differ in
-*how* they use it:
+**This thesis** = the port-Hamiltonian plant as the model + model-based RL on it.  **The work it is compared with**
+= how the team trains today: model-free PPO in MuJoCo (Eric Plass's k1_kick, k1_sprint, RL_Core).  The two are kept
+apart everywhere: in the names, the tables and the code.
 
-- **Arm B, "pH as planner"** (called the model-based arm in this file). Planning at decision time (the book's
-  MPC, 5.2.2.1): at every control step a planner looks a short time ahead in the model; a policy network and a
-  value network learn together with it.
-- **Arm A, "pH as simulator"** (called the PPO arm). Model-free rsl-rl PPO on samples from the model (the book's
-  imagination, Alg. 5.1 / 5.4 with a given model; Full Body `rl/<skill>/train.py`).
+| Row | Physics | Learning | Whose | Role |
+|---|---|---|---|---|
+| **Thesis approach** | pH plant (Full Body, fitted to robot logs with `mbrl/fit.py`) | model-based: at every control step a planner looks a short time ahead in the pH model; a policy network and a value network learn together with it (`mbrl/mpc`) | this thesis | the result |
+| **Baseline** | MuJoCo | model-free PPO (rsl-rl) | the team (Eric's policies and training) | what the thesis is measured against; never a part of the thesis approach |
+| Ablation: PPO on pH | pH plant | model-free PPO (Full Body `rl/<skill>/train.py`) | this thesis | separates the two changes: is a difference due to the physics (pH instead of MuJoCo) or to the learning (planning instead of PPO)? |
 
-The question: with the same model, does planning at decision time reach the same quality with fewer environment
-samples, and at what cost in computing?  "It does not" is a valid result.
+In this file "model-based arm" = the thesis approach, "PPO arm" = the ablation (PPO on pH) unless MuJoCo is named.
+
+The question: does model-based RL on the pH model reach the quality of the team's PPO-in-MuJoCo policies, on the pH
+plant, in MuJoCo and on the robot, and at what cost (environment steps, model steps, hours)?  "It does not" is a
+valid result.  (Checked against Plaat, *Deep Reinforcement Learning* (2022), ch. 5 on 16 Nov 2026: the protocol
+rules 4-6 below come from there.)
 
 Rules (set on 15 Nov 2026):
 
@@ -95,7 +97,7 @@ Results so far that belong in the thesis:
 | 2 ball on the GPU | done 16 Nov inside the `mb-stand` kernel: nvcc build, 70 Full Body tests and 40 tests of this repo passed on the T4 (`outputs/kaggle/mb-stand-v1/logs/setup.log`) |
 | 3 snapshot / restore | done 15 Nov for the plant and `StandEnv` (test `rl/stand/tests`, exact) |
 | 4 learner on standing | **done 16 Nov, laptop gate passed** (see "Package 4: findings"): the policy alone stands |
-| 5 stage 1 result | **run done 16 Nov, result below: not yet level with PPO; the learner drifts after its best point (see "Package 5: findings")** |
+| 5 stage 1 result | **`mb-stand-v1` done 16 Nov: not level with PPO, drifted after its best point. Cause found and fixed the same day (planner centred, small noise for refining): 14.0 W -> 6.8 W on the laptop. Next: `mb-stand-v2` on Kaggle (see "Package 5: findings")** |
 | 6-7 | open; do not start before the learner holds its best point |
 
 Reference rows for stage 1 (`python rl/stand/evaluate.py --policy <file> -B 128`, 10 s episodes, pushes and noise):
@@ -214,10 +216,62 @@ Do them in order. Each ends with `scripts/test_all.sh` green, a commit, a push, 
   the robots the planner controls against the robots the bare policy controls) and `Plan/correction` (mean size of
   planner action minus policy action).  If the planner's robots do not earn more than the policy's, imitating the
   planner cannot improve the policy.
+- Laptop check 1 (16 Nov; `model_260.pt`, networks frozen with `--lr 0 --value-lr 0`, 64 x 8, sigma 0.2, the old
+  weighted mean of the candidates): reward per step of the planner's robots against the policy's robots:
+  horizon 5: 0.0220 against 0.0231 (-4.6 %, standard error 0.5 %, 35 iterations); horizon 25: 0.0214 against
+  0.0231 (-7.1 % +- 1.3 %, 18 iterations).  **The planner makes a standing robot worse, and a longer horizon does
+  not repair it.**  So the policy was imitating something worse than itself.
+- Found in the planner: it executed the weighted mean of 8 noisy candidates; with equal scores that is still the
+  mean of their noise, new at every control step (jitter).  Since 16 Nov the planner is centred (`center`, default
+  on): action = policy action + sum (w_i - 1/N) (candidate_i - policy action); `--no-center` gives the old one.
+  `--temperature-abs` weighs score differences in reward units instead of against the candidates' own spread.
+- Laptop check 2 (16 Nov; the centred planner, same set-up, horizon 5): sigma 0.2: -4.6 % +- 0.6 (32 iterations,
+  no better than before); **sigma 0.05: +12.0 % +- 0.5 (36 iterations): the planner's robots now earn more than
+  the policy's.**  Horizon 15 with sigma 0.05: +5.6 % +- 0.6 (13 iterations, still running when written).  So near
+  a good stand the planner helps only with small noise; sigma 0.2 was right for learning to stand at all and wrong
+  for refining it.
+- **Learning run with the fix** (`mb-stand-s05`: from `model_260.pt`, 64 x 8 x 5, `--sigma 0.05 --lr 1e-4
+  --value-lr 1e-4`, 50 min on the laptop, 0.2 M more executed steps): `policies/mb-stand-s05_392.bin` on the C++
+  plant, 128 robots: **6.8 W** (from 14.0), tilt 1.0 deg (from 1.3), falls under pushes 5.5 % (from 2.3 %); quiet:
+  5.3 W, no falls.  The policy improves again instead of drifting.  Open: the falls under pushes went up (small
+  noise explores less against pushes), and PPO-on-pH is at 2.1 W / 0 %.
+- Next for the Kaggle run `mb-stand-v2`: sigma 0.2 until the robots stand (the in-run evaluation shows it), then
+  0.05; `--lr 1e-4` after a resume (the replay is empty then).  A schedule for sigma is not written yet.
 - Fixes to try, in this order, each on the laptop first from `model_260.pt` (`--resume`): (1) a longer horizon
   (25 steps = 0.5 s) so that model rewards carry the score; (2) lower `--sigma` (0.2 -> 0.05) once it stands, the
   policy imitates that noise; (3) keep the checkpoint with the best evaluation and say so in the thesis (the same
   rule for PPO).
+
+### Gradients through the pH model (test of 16 Nov; `mbrl/grad/`)
+Question: can the policy learn from the gradient of the reward through the pH model (SVG / Dreamer / SHAC in the
+literature) instead of from random tries?  The Python plant (`Full Body/ph_k1/plant.py`, `firmware.py`) is PyTorch,
+so autograd runs through it **without any change to the plant**.
+- `python -m mbrl.grad.check --steps 1 5 20 [--push 0.3]`: d cost / d joint targets of a standing robot (foot
+  contact, PD, motor driver; cost = copper energy + tilt) against central finite differences:
+  1 control step (20 plant steps): worst relative error 2.5e-7; 5 steps: 5.7e-8; **20 steps (400 plant steps):
+  6.2e-7**, gradient norm 3.3 / 6.8 / 17 (grows about linearly, no blow-up); with a 0.3 m/s sideways push at the
+  start (contact changes): 4.9e-8.  **The gradients are right and stay usable over 0.4 s of standing.**
+- Speed (laptop, one thread, 8 robots): 16 ms forward and 49 ms backward per plant step, i.e. about 13 s for one
+  gradient through 10 control steps.  With PyTorch's default threads next to other jobs it was 30 times slower:
+  always pass `--threads 1`.  A real training needs derivative code in the C++/CUDA plant or the Python plant on
+  a GPU; neither exists.
+- `python -m mbrl.grad.refine --policy <model.pt> --threads 1 ...`: rl/stand's task rebuilt on the Python plant
+  (`GradStand`: contract, firmware chain with slew and 20 ms delay, the smooth reward terms), truncated
+  backpropagation through K control steps, Adam on the policy.
+- Results of `refine` from `model_260.pt` (13.3 W on the Python plant, the same as on the C++ plant), 10 control
+  steps per rollout, **without** a value network: lr 3e-4, 16 robots: better for two steps (11.6 W), then broken
+  (50 W at step 5, falls from step 8; `deploy_10.bin` on the C++ plant: 100 % falls).  lr 2e-5 (all layers) and
+  lr 1e-4 (last layer only), 8 robots: no falls, but the power rises steadily: 13.4 -> 36 W and 13.4 -> 80 W in
+  12 iterations (runs cut off there).  **Correct gradients, but following them over a 0.2 s window makes the stand
+  worse**: the window does not see what the change costs later (the same lesson as the planner without its value
+  network).
+- `--value` adds the checkpoint's value network at the end of the window (the SHAC recipe).  **Not tested yet**:
+  the runs were stopped after one iteration because the laptop (7 GB) ran out of memory with three jobs.  Run
+  one job at a time: `python -m mbrl.grad.refine --policy outputs/kaggle/mb-stand-v1/runs/mb-stand-v1/model_260.pt
+  --threads 2 --robots 8 --steps 10 --lr 2e-5 --value --minutes 25 --save-every 20 --run-name grad-stand-f`, then
+  score `logs/grad-stand-f/deploy_<it>.bin` with `Full Body/rl/stand/evaluate.py`.
+- Status: an investigated alternative.  It becomes a method only if the `--value` run lowers the power without
+  falls, and then it still needs derivative code in the C++/CUDA plant (or the Python plant on a GPU).
 
 ### Package 6: walking, both arms (medium + ~7 h of Kaggle per run)
 - Do: `Full Body/rl/walk/{env,train,evaluate}.py`: Eric's walk task and rewards on the pH plant, ported from

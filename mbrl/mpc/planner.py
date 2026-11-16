@@ -30,7 +30,8 @@ def index_snapshot(snap, idx: torch.Tensor):
 
 class Planner:
     def __init__(self, world, model, policy, value, candidates: int, horizon: int, sigma: float = 0.3,
-                 beta: float = 0.7, gamma: float = 0.99, temperature: float = 0.5, after_restore=None):
+                 beta: float = 0.7, gamma: float = 0.99, temperature: float = 0.5, after_restore=None,
+                 center: bool = True, temperature_abs: float = 0.0):
         R, N = world.num_envs, candidates
         if model.num_envs != R * N:
             raise ValueError(f"the model needs {R} x {N} = {R * N} robots, it has {model.num_envs}")
@@ -38,6 +39,11 @@ class Planner:
         self.R, self.N, self.H = R, N, horizon
         self.sigma, self.beta, self.gamma, self.temperature = sigma, beta, gamma, temperature
         self.after_restore = after_restore
+        # center: move the action only by what the weights prefer (uniform weights = the bare policy's action);
+        # without it 8 candidates of equal score still shift the action by the mean of their noise (jitter).
+        # temperature_abs > 0: weights from score differences in reward units, so differences below it barely
+        # move the action; 0: differences are measured against the candidates' own spread (always a full step).
+        self.center, self.temperature_abs = center, temperature_abs
         self.rows = torch.arange(R, device=world.device).repeat_interleave(N)       # model robot -> world robot
         self.bare = (torch.arange(R * N, device=world.device) % N) == 0             # copy 0: the policy without noise
         self.model_steps = 0
@@ -72,9 +78,14 @@ class Planner:
         self.model_steps += R * N * self.H
         G = G.reshape(R, N)
         spread = G.std(-1, keepdim=True).clamp_min(1e-6)
-        w = torch.softmax((G - G.amax(-1, keepdim=True)) / (self.temperature * spread), -1)
-        action = (w[..., None] * first.reshape(R, N, -1)).sum(1)
+        scale = self.temperature_abs if self.temperature_abs > 0 else self.temperature * spread
+        w = torch.softmax((G - G.amax(-1, keepdim=True)) / scale, -1)
+        first = first.reshape(R, N, -1)
+        if self.center:
+            action = first[:, 0] + ((w - 1.0 / N)[..., None] * (first - first[:, :1])).sum(1)
+        else:
+            action = (w[..., None] * first).sum(1)
         info = {"return_policy": G[:, 0], "return_planner": (w * G).sum(-1), "return_best": G.amax(-1), "return_mean": G.mean(-1),
                 "weight_entropy": -(w * (w + 1e-12).log()).sum(-1) / math.log(N),
-                "policy_action": first.reshape(R, N, -1)[:, 0]}
+                "spread": spread.squeeze(-1), "policy_action": first[:, 0]}
         return action.to(world.dtype), info

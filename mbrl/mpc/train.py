@@ -62,6 +62,8 @@ def main():
     ap.add_argument("--horizon", type=int, default=10, help="planner steps of 20 ms (H)")
     ap.add_argument("--sigma", type=float, default=0.3)
     ap.add_argument("--temperature", type=float, default=0.5)
+    ap.add_argument("--temperature-abs", type=float, default=0.0, help="> 0: weights from score differences in reward units")
+    ap.add_argument("--no-center", action="store_true", help="the old weighted mean of the candidates")
     ap.add_argument("--policy-share", type=float, default=0.5)
     ap.add_argument("--steps", type=int, default=24, help="control steps per iteration (T)")
     ap.add_argument("--lr", type=float, default=1e-3)
@@ -87,6 +89,7 @@ def main():
 
     world, model, export, evaluate, video, after_restore = TASKS[args.task](args)
     cfg = LearnConfig(candidates=args.candidates, horizon=args.horizon, sigma=args.sigma, temperature=args.temperature,
+                      temperature_abs=args.temperature_abs, center=not args.no_center,
                       policy_share=args.policy_share, steps=args.steps, lr=args.lr, value_lr=args.value_lr, seed=args.seed)
     run = None
     if not args.no_wandb:
