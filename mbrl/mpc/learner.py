@@ -1,9 +1,10 @@
 r"""The model-based learner's loop: plan, act in the world, learn from what was executed.
 
 One iteration:
-  1. T control steps.  At each the planner (planner.py) gives every world robot an action; a share `policy_share` of
-     the robots executes the bare policy's action instead (so the policy also sees the states its own mistakes lead
-     to), but every robot's label is the planner's action.
+  1. T control steps.  At each the planner (planner.py) gives every world robot an action.  A fixed share
+     `policy_share` of the robots executes the bare policy's action instead, for whole episodes, so the policy sees
+     the states its own mistakes lead to (DAgger); every robot's label is the planner's action.  (Mixing per step
+     instead let the planner stand for 10 s while the policy alone still fell after 2 s: laptop run 2.)
   2. The value network fits the lambda-returns of the executed rollout.
   3. The policy regresses on the planner's actions, on a replay of the last `replay` rollouts.
 
@@ -37,11 +38,13 @@ class LearnConfig:
     gamma: float = 0.99
     lam: float = 0.95
     steps: int = 24               # T: control steps per iteration
-    policy_share: float = 0.25    # share of the robots that execute the bare policy
+    policy_share: float = 0.5     # share of the robots that execute the bare policy (always the same robots)
     replay: int = 20              # rollouts the policy learns from
     epochs: int = 4
     minibatches: int = 4
     lr: float = 1e-3
+    value_lr: float = 3e-4
+    value_warmup: tuple = (10, 40)  # iterations: the value's weight in the planner's score is 0 until the first, 1 from the second
     hidden: tuple = (512, 256, 128)
     seed: int = 1
 
@@ -60,11 +63,14 @@ class Learner:
         self.policy = MLP(obs["policy"].shape[1], world.num_actions, cfg.hidden, last_scale=0.01).to(dev)
         self.value = MLP(obs["critic"].shape[1], 1, cfg.hidden).to(dev)
         self.opt_p = torch.optim.Adam(self.policy.parameters(), lr=cfg.lr)
-        self.opt_v = torch.optim.Adam(self.value.parameters(), lr=cfg.lr)
+        self.opt_v = torch.optim.Adam(self.value.parameters(), lr=cfg.value_lr)
         self.planner = Planner(world, model, self.policy, self.value, cfg.candidates, cfg.horizon, cfg.sigma, cfg.beta,
                                cfg.gamma, cfg.temperature, after_restore)
         self.buffer: deque = deque(maxlen=cfg.replay)
         self.iteration, self.executed = 0, 0
+        R = world.num_envs
+        self.bare = (torch.arange(R, device=dev) < round(cfg.policy_share * R))[:, None]   # these run the bare policy
+        self.age = torch.zeros(R, device=dev)                                              # steps since the robot's reset
         self.stop = None
         (self.run_dir / "config.json").write_text(json.dumps(
             {"learner": asdict(cfg), "world_robots": world.num_envs, "model_robots": model.num_envs,
@@ -108,19 +114,25 @@ class Learner:
         dev = world.device
         O, C, A, Rw, D, TO, V = [], [], [], [], [], [], []
         stats = {k: [] for k in ("return_policy", "return_planner", "return_best", "weight_entropy")}
+        lengths = {"policy": [], "planner": []}   # seconds of the episodes that ended, by who controlled the robot
         env_log: dict = {}
         obs = world.get_observations()
         with torch.no_grad():
             for _ in range(cfg.steps):
                 a_plan, info = self.planner.plan()
-                bare = torch.rand(R, 1, device=dev) < cfg.policy_share
-                a = torch.where(bare, info["policy_action"].to(a_plan.dtype), a_plan)
+                a = torch.where(self.bare, info["policy_action"].to(a_plan.dtype), a_plan)
                 O.append(obs["policy"].float())
                 C.append(obs["critic"].float())
                 A.append(a_plan.float())
                 V.append(self.value(obs["critic"]).squeeze(-1))
                 obs, r, done, extras = world.step(a)
                 Rw.append(r.float())
+                self.age += 1
+                ended = done.bool()
+                dt = getattr(world.cfg, "policy_dt", 0.02)
+                lengths["policy"].append(self.age[ended & self.bare[:, 0]] * dt)
+                lengths["planner"].append(self.age[ended & ~self.bare[:, 0]] * dt)
+                self.age[ended] = 0
                 D.append(done.float())
                 TO.append(extras.get("time_outs", torch.zeros_like(done)).float())
                 for k in stats:
@@ -145,6 +157,10 @@ class Learner:
         out["stats"] = {k: float(torch.cat(v).mean()) for k, v in stats.items()}
         out["stats"]["reward_step"] = float(torch.stack(Rw).mean())
         out["stats"]["done_rate"] = float(torch.stack(D).mean())
+        for k, v in lengths.items():
+            v = torch.cat(v)
+            if v.numel():
+                out["stats"][f"episode_s_{k}"] = float(v.mean())
         out["env_log"] = {k: float(torch.cat(v).mean()) for k, v in env_log.items()}
         return out
 
@@ -152,9 +168,12 @@ class Learner:
         cfg = self.cfg
         self.policy.obs_normalizer.update(batch["obs"])
         self.value.obs_normalizer.update(batch["critic"])
-        self.buffer.append((batch["obs"], batch["action"]))
+        # the value also learns from the replay: one rollout alone is too little (first run: 384 samples, it diverged)
+        self.buffer.append((batch["obs"], batch["action"], batch["critic"], batch["ret"]))
         obs = torch.cat([b[0] for b in self.buffer])
         act = torch.cat([b[1] for b in self.buffer])
+        critic = torch.cat([b[2] for b in self.buffer])
+        ret = torch.cat([b[3] for b in self.buffer])
         loss_p = loss_v = torch.zeros(())
         for _ in range(cfg.epochs):
             perm = torch.randperm(obs.shape[0], device=obs.device)
@@ -164,10 +183,9 @@ class Learner:
                 loss_p.backward()
                 torch.nn.utils.clip_grad_norm_(self.policy.parameters(), 1.0)
                 self.opt_p.step()
-            n = batch["critic"].shape[0]
-            perm = torch.randperm(n, device=obs.device)
-            for mb in perm.split(max(1, n // cfg.minibatches)):
-                loss_v = (self.value(batch["critic"][mb]).squeeze(-1) - batch["ret"][mb]).square().mean()
+            perm = torch.randperm(critic.shape[0], device=obs.device)
+            for mb in perm.split(max(1, critic.shape[0] // cfg.minibatches)):
+                loss_v = (self.value(critic[mb]).squeeze(-1) - ret[mb]).square().mean()
                 self.opt_v.zero_grad()
                 loss_v.backward()
                 torch.nn.utils.clip_grad_norm_(self.value.parameters(), 1.0)
@@ -185,12 +203,15 @@ class Learner:
             end = self.iteration + iterations
             while self.iteration < end and self.stop is None:
                 t_it = time.time()
+                lo, hi = self.cfg.value_warmup
+                self.planner.value_weight = min(1.0, max(0.0, (self.iteration - lo) / max(1, hi - lo)))
                 batch = self.collect()
                 learn = self.update(batch)
                 self.iteration += 1
                 now = time.time()
                 row = {"iteration": self.iteration, "Cost/executed_steps": self.executed,
                        "Cost/model_steps": self.planner.model_steps, "Cost/seconds": now - t_it,
+                       "Plan/value_weight": self.planner.value_weight,
                        **{f"Plan/{k}": v for k, v in batch["stats"].items()},
                        **{f"Learn/{k}": v for k, v in learn.items()}, **batch["env_log"]}
                 if self.evaluate is not None and eval_every_min > 0 and (now - last["eval"]) / 60 >= eval_every_min:
@@ -209,8 +230,9 @@ class Learner:
                 if self.iteration % print_every == 0:
                     s = batch["stats"]
                     extra = "".join(f"  {k.split('/')[-1]} {v:.3g}" for k, v in row.items() if k.startswith("Eval/"))
+                    ep = "  ".join(f"{k} {s[f'episode_s_{k}']:.1f} s" for k in ("planner", "policy") if f"episode_s_{k}" in s)
                     self.log(f"[mb] it {self.iteration:4d}  executed {self.executed:8d}  planner {s['return_planner']:7.3f} "
-                             f"policy {s['return_policy']:7.3f}  done/step {s['done_rate']:.4f}  "
+                             f"policy {s['return_policy']:7.3f}  episodes: {ep or '-'}  "
                              f"loss p {learn['policy_loss']:.4f} v {learn['value_loss']:.4f}  ({row['Cost/seconds']:.1f} s){extra}")
                 if minutes > 0 and (time.time() - t0) / 60 > minutes:
                     self.stop = f"time budget of {minutes:g} min used up"

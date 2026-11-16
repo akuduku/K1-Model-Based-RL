@@ -41,6 +41,7 @@ class Planner:
         self.rows = torch.arange(R, device=world.device).repeat_interleave(N)       # model robot -> world robot
         self.bare = (torch.arange(R * N, device=world.device) % N) == 0             # copy 0: the policy without noise
         self.model_steps = 0
+        self.value_weight = 1.0   # the learner raises it from 0 while the value network is still untrained
 
     @torch.no_grad()
     def plan(self) -> tuple[torch.Tensor, dict]:
@@ -66,7 +67,8 @@ class Planner:
             G += disc * r.float() * alive
             alive &= ~done.bool()
             disc *= self.gamma
-        G += disc * self.value(obs["critic"]).float().squeeze(-1) * alive
+        if self.value_weight > 0:
+            G += self.value_weight * disc * self.value(obs["critic"]).float().squeeze(-1) * alive
         self.model_steps += R * N * self.H
         G = G.reshape(R, N)
         spread = G.std(-1, keepdim=True).clamp_min(1e-6)

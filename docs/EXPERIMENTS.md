@@ -146,6 +146,17 @@ Do them in order. Each ends with `scripts/test_all.sh` green, a commit, a push, 
 - Next steps, in this order: (a) the planner alone, value = 0, policy = start pose: does it stand longer than 3.1 s,
   and with which horizon (10, 20, 35 steps)? (b) fit the value on the replay of the last rollouts, lower its learning
   rate, and let its weight in the planner's score rise from 0 over the first iterations; (c) more world robots.
+- (a) done: the planner alone (value 0, policy = start pose) does not stand: 3.1-3.4 s with 10, 20 and 35 steps of
+  horizon, as with no action.  A fall takes 3 s; inside the horizon "do nothing" scores best (moving costs
+  action-rate, the fall's penalty is out of sight).  The value network has to carry that knowledge.
+- (b) + (c) done (value on the replay, `value_lr` 3e-4, `value_warmup` 10-40 iterations, 64 robots x 8 x 5):
+  laptop run 2 (40 min, 165 iterations, 253 k executed and 10.1 M model steps): **the robots under the planner stand
+  9.5-9.8 s of 10 s** from iteration ~140 on (PPO `stand-ph-v1` stood whole episodes after about 14 M steps).
+  The bare policy still fell after ~2 s: it was only in control for single steps.
+- So `policy_share` is now a fixed half of the robots that run the bare policy for whole episodes (DAgger); the log
+  shows the episode lengths of both groups.  Laptop run 3 continues run 2 with it
+  (`--resume logs/mb-stand-laptop2/model_165.pt`).  **The gate needs: the policy group's episodes near 10 s and
+  `rl/stand/evaluate.py` on the `deploy_<it>.bin` with few falls.**
 - Trap: do not stop a run with `pkill -f mbrl.mpc.train` from the same shell line that mentions it; it kills the
   shell too. Use the process id.
 

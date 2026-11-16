@@ -62,7 +62,7 @@ def main():
     ap.add_argument("--horizon", type=int, default=10, help="planner steps of 20 ms (H)")
     ap.add_argument("--sigma", type=float, default=0.3)
     ap.add_argument("--temperature", type=float, default=0.5)
-    ap.add_argument("--policy-share", type=float, default=0.25)
+    ap.add_argument("--policy-share", type=float, default=0.5)
     ap.add_argument("--steps", type=int, default=24, help="control steps per iteration (T)")
     ap.add_argument("--lr", type=float, default=1e-3)
     ap.add_argument("--iterations", type=int, default=1_000_000)
