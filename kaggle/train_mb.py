@@ -24,7 +24,7 @@ kaggle/run.sh overrides the settings below:
     TASK=kick-mbrl kaggle/run.sh HOURS=8                      # both in one session
     TASK=mb-stand kaggle/run.sh HOURS=6 RUN_NAME=mb-stand-v1  # the model-based learner (mbrl.mpc) on standing
     TASK=grad-bench kaggle/run.sh HOURS=1                     # speed of gradients through the pH plant (mbrl.grad.bench)
-    TASK=grad-stand kaggle/run.sh HOURS=6 RUN_NAME=grad-stand-v1 GRAD_ROBOTS=256   # the professor's formula, from scratch
+    TASK=grad-stand kaggle/run.sh HOURS=6 RUN_NAME=grad-stand-v1            # the professor's formula, from scratch
 
 The kick tasks: kick-plan runs `python -m mbrl.kick.plan` (CEM over the kick plan of mbrl/kick/controller.py, one
 search per ball speed in KICK_SPEEDS, through the walk policy WALK), kick-track runs `python -m mbrl.kick.train --plan
@@ -87,7 +87,8 @@ KICK_WANDB_PROJECT = "Akos pH Kick MBRL"
 MB_ROBOTS = 256                           # mb-*: world robots of the model-based learner (mbrl.mpc)
 MB_CANDIDATES = 8                         # mb-*: model copies per world robot
 MB_HORIZON = 5                            # mb-*: planner steps of 20 ms
-GRAD_ROBOTS = 256                         # grad-stand: robots of the gradient learner (mbrl.grad.train); set from grad-bench
+GRAD_ROBOTS = 0                           # grad-stand: robots of the gradient learner (mbrl.grad.train); 0 = as many as
+                                          # fit, measured on the GPU at the start
 GRAD_STEPS = 20                           # grad-stand: control steps per window
 GRAD_DEVICE = "cuda"                      # grad-stand: where the Python pH plant runs
 GRAD_BENCH_ROBOTS = "64,256,1024"         # grad-bench: robots per row
@@ -308,7 +309,7 @@ def main():
         # how fast is a gradient through the Python pH plant on the T4 (16 Nov on the kernel's CPU, 2 threads, float32:
         # 64 robots 24 and 256 robots 38 robot-control-steps per second)
         go([py, "-u", "-m", "mbrl.grad.bench", "--devices", "cuda", "--robots", *str(GRAD_BENCH_ROBOTS).split(","),
-            "--dtypes", "float32", "--steps", 2, "--trace"], "benchmark (GPU)")
+            "--dtypes", "float32", "--steps", 20, "--trace"], "benchmark (GPU)")
     elif TASK == "grad-stand":
         # the professor's formula: standing from scratch with derivatives of the cost through the pH model
         go([py, "-u", "-m", "mbrl.grad.train", "--run-name", run_name, "--robots", GRAD_ROBOTS, "--steps", GRAD_STEPS,

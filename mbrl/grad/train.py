@@ -40,14 +40,47 @@ from rl.stand import contract as C
 OBS_NOISE = {"gyro": 0.2, "gravity": 0.05, "joint_pos": 0.01, "joint_vel": 1.0}   # rl/stand/env.py StandConfig
 
 
-def window(env: GradStand, policy: MLP, args, alive_age: torch.Tensor) -> dict:
-    """One look-ahead window.  -> observations, actions, d(-L)/d(action) (clipped per robot), and numbers to log."""
-    B = env.B
+def window(env: GradStand, policy: MLP, args, alive_age: torch.Tensor | None = None) -> dict:
+    """One look-ahead window.  -> observations, actions, d(objective)/d(action) (clipped per robot), numbers to log.
+
+    Forward without a graph, remembering the state before every control step and every random draw.  Backward one
+    control step at a time: the step is computed again with a graph, and the derivative of everything later (the
+    co-state, one number per state entry) is carried back through it.  Memory is one control step, whatever the
+    length of the window; `window_one_graph` is the same calculation in a single graph (the test compares them)."""
+    B, K, dev = env.B, args.steps, env.device
+    t_start = time.time()
     env.detach()
+    states, noises, epss, pushes, lives, falls, discs = [], [], [], [], [], [], []
     obs_list, act_list, grads = [], [], []
-    alive = torch.ones(B, dtype=torch.bool, device=env.device)
-    objective, disc = 0.0, 1.0
-    reward_sum, watts, fell_now = 0.0, [], torch.zeros(B, dtype=torch.bool, device=env.device)
+    alive = torch.ones(B, dtype=torch.bool, device=dev)
+    fell_now = torch.zeros(B, dtype=torch.bool, device=dev)
+    reward_sum, watts, objective, disc = 0.0, [], 0.0, 1.0
+    with torch.no_grad():
+        for _ in range(K):
+            env.redraw_lags()
+            states.append(env.get_state())
+            clean = env.observe(noise=False)
+            o = env.observe()
+            a = policy(o)
+            eps = args.action_noise * torch.randn(a.shape, device=a.device, dtype=a.dtype)
+            push = env.draw_pushes()
+            r, info = env.step(a + eps, push)
+            live = alive.to(r.dtype)
+            objective += disc * float((r * live).mean())
+            reward_sum += float((r * live).sum())
+            watts.append(float((info["copper_W"] * live).sum() / live.sum().clamp_min(1.0)))
+            fallen = env.fallen() & alive
+            if bool(fallen.any()):      # the end state of a fall is far from x_T: term 2, charged now
+                objective -= disc * float((env.terminal_cost(args.terminal_seconds, args.terminal_kinetic)
+                                           * fallen.to(r.dtype)).mean()) * args.fall_weight
+            noises.append(o - clean); epss.append(eps); pushes.append(push); lives.append(live)
+            falls.append(fallen); discs.append(disc)
+            obs_list.append(o); act_list.append(a)
+            fell_now |= fallen
+            alive &= ~fallen
+            disc *= args.gamma
+        end = env.get_state()
+    t_forward = time.time() - t_start
 
     def clip_and_keep(g):   # per robot: at most clip x the batch median; what flows on is the clipped one
         n = g.norm(dim=-1, keepdim=True)
@@ -55,46 +88,83 @@ def window(env: GradStand, policy: MLP, args, alive_age: torch.Tensor) -> dict:
         grads.append(g.detach())
         return g
 
+    def leaves_of(state):
+        return {k: state[k].detach().requires_grad_(True) for k in env.FLOAT_STATE}
+
+    def co_state(objective_part, leaves):
+        g = torch.autograd.grad(objective_part, list(leaves.values()), allow_unused=True)
+        return {k: (torch.zeros_like(leaves[k]) if gi is None else gi) for k, gi in zip(leaves, g)}
+
+    # the end of the window: term 2
+    leaves = leaves_of(end)
+    env.set_state({**end, **leaves})
+    term2 = env.terminal_cost(args.terminal_seconds, args.terminal_kinetic)
+    lam = co_state(-disc * (term2 * alive.to(term2.dtype)).mean(), leaves)
+    objective -= disc * float((term2.detach() * alive.to(term2.dtype)).mean())
+    for t in reversed(range(K)):
+        leaves = leaves_of(states[t])
+        env.set_state({**states[t], **leaves})
+        a = policy(env.observe(noise=False) + noises[t])
+        a.register_hook(clip_and_keep)
+        r, _ = env.step(a + epss[t], pushes[t])
+        part = discs[t] * (r * lives[t]).mean()
+        if bool(falls[t].any()):
+            part = part - discs[t] * (env.terminal_cost(args.terminal_seconds, args.terminal_kinetic)
+                                      * falls[t].to(r.dtype)).mean() * args.fall_weight
+        after = env.get_state()
+        part = part + sum((lam[k] * after[k]).sum() for k in env.FLOAT_STATE)     # everything later, through this step
+        lam = co_state(part, leaves)
+    env.set_state(end)               # the next window goes on from the end of this one
+    g = torch.stack(grads[::-1])     # the hooks ran last step first; they saw d(objective)/d(action)
+    norms = g.norm(dim=-1)
+    return {"obs": torch.stack(obs_list), "act": torch.stack(act_list), "g": g, "fell": fell_now,
+            "stats": {"reward_step": reward_sum / (B * K), "copper_W": sum(watts) / len(watts),
+                      "term2": float(term2.detach().mean()), "grad_median": float(norms.median()),
+                      "grad_max_over_median": float(norms.max() / norms.median().clamp_min(1e-30)),
+                      "clipped": float((norms >= 0.999 * args.clip * norms.median(dim=1, keepdim=True).values).float().mean()),
+                      "fell": float(fell_now.float().mean()), "objective": objective,
+                      "seconds_forward": t_forward, "seconds_backward": time.time() - t_start - t_forward}}
+
+
+def window_one_graph(env: GradStand, policy: MLP, args) -> torch.Tensor:
+    """The same d(objective)/d(action) as `window`, from one graph over the whole window (memory grows with the
+    window; for the test only).  -> (K, B, 22)."""
+    B = env.B
+    env.detach()
+    grads = []
+    alive = torch.ones(B, dtype=torch.bool, device=env.device)
+    objective, disc = 0.0, 1.0
+
+    def clip_and_keep(g):
+        n = g.norm(dim=-1, keepdim=True)
+        g = g * (args.clip * n.median() / n.clamp_min(1e-30)).clamp(max=1.0)
+        grads.append(g.detach())
+        return g
+
     for _ in range(args.steps):
         env.redraw_lags()
-        o = env.observe()
-        a = policy(o)
+        a = policy(env.observe())
         a.register_hook(clip_and_keep)
-        obs_list.append(o.detach())
-        act_list.append(a.detach())
-        if args.action_noise > 0:   # a constant added to the action: the derivative with respect to a is unchanged
-            a = a + args.action_noise * torch.randn(a.shape, device=a.device, dtype=a.dtype)
-        r, info = env.step(a, env.draw_pushes())
-        live = alive.to(r.dtype)
-        objective = objective + disc * (r * live).mean()
-        reward_sum = reward_sum + float((r.detach() * live).sum())
-        watts.append(float((info["copper_W"] * live).sum() / live.sum().clamp_min(1.0)))
+        a = a + args.action_noise * torch.randn(a.shape, device=a.device, dtype=a.dtype)
+        r, _ = env.step(a, env.draw_pushes())
+        objective = objective + disc * (r * alive.to(r.dtype)).mean()
         fallen = env.fallen() & alive
-        if bool(fallen.any()):      # the end state of a fall is far from x_T: term 2, charged now
+        if bool(fallen.any()):
             objective = objective - disc * (env.terminal_cost(args.terminal_seconds, args.terminal_kinetic)
                                             * fallen.to(r.dtype)).mean() * args.fall_weight
-            fell_now |= fallen
             alive &= ~fallen
         disc *= args.gamma
     term2 = env.terminal_cost(args.terminal_seconds, args.terminal_kinetic)
     objective = objective - disc * (term2 * alive.to(term2.dtype)).mean()
-    for p in policy.parameters():
-        p.grad = None
-    (-objective).backward()          # through the pH model
-    g = -torch.stack(grads[::-1])    # hooks ran last step first; they saw d(loss)/d(action) = -d(objective)/d(action)
-    norms = g.norm(dim=-1)
-    return {"obs": torch.stack(obs_list), "act": torch.stack(act_list), "g": g, "fell": fell_now,
-            "stats": {"reward_step": reward_sum / (B * args.steps), "copper_W": sum(watts) / len(watts),
-                      "term2": float(term2.detach().mean()), "grad_median": float(norms.median()),
-                      "grad_max_over_median": float(norms.max() / norms.median().clamp_min(1e-30)),
-                      "clipped": float((norms >= 0.999 * args.clip * norms.median(dim=1, keepdim=True).values).float().mean()),
-                      "fell": float(fell_now.float().mean()), "objective": float(objective.detach())}}
+    objective.backward()
+    return torch.stack(grads[::-1])
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--run-name", default="grad-stand")
-    ap.add_argument("--robots", type=int, default=8)
+    ap.add_argument("--robots", type=int, default=8, help="0 = as many as fit: measured on the GPU at the start")
+    ap.add_argument("--max-robots", type=int, default=1024, help="upper bound for --robots 0")
     ap.add_argument("--steps", type=int, default=20, help="control steps per window (K)")
     ap.add_argument("--delta", type=float, default=0.05, help="RMS change of the action targets per update (action units)")
     ap.add_argument("--delta-final", type=float, default=None,
@@ -109,7 +179,6 @@ def main():
     ap.add_argument("--fall-weight", type=float, default=1.0, help="term 2 at the moment of a fall, times this")
     ap.add_argument("--episode-s", type=float, default=10.0, help="robots start again after this long")
     ap.add_argument("--quiet", action="store_true", help="no sensor noise, no pushes, 20 ms delay")
-    ap.add_argument("--no-checkpoint", action="store_true", help="keep the whole window in memory (faster, more memory)")
     ap.add_argument("--iterations", type=int, default=1_000_000)
     ap.add_argument("--minutes", type=float, default=0.0)
     ap.add_argument("--hours", type=float, default=0.0)
@@ -139,8 +208,25 @@ def main():
     world = {} if args.quiet else {"obs_noise": OBS_NOISE, "push_dv": 0.3, "delay_ms": (10.0, 70.0)}
 
     def make_env(robots: int) -> GradStand:
-        return GradStand(robots, seed=args.seed, device=args.device, dtype=dtype, checkpoint=not args.no_checkpoint, **world)
+        return GradStand(robots, seed=args.seed, device=args.device, dtype=dtype, **world)
 
+    if args.robots <= 0:      # measure one short window with 64 robots, then take what fits in 60 % of the GPU
+        args.robots = 16
+        if str(args.device).startswith("cuda"):
+            probe = make_env(64)
+            torch.cuda.synchronize()
+            torch.cuda.reset_peak_memory_stats()
+            window(probe, MLP(C.OBS_DIM, NA, last_scale=0.01).to(device=args.device, dtype=dtype),
+                   argparse.Namespace(**{**vars(args), "steps": 2}))
+            torch.cuda.synchronize()
+            per_robot = torch.cuda.max_memory_allocated() / 64
+            total = torch.cuda.get_device_properties(0).total_memory
+            probe = None
+            gc.collect()
+            torch.cuda.empty_cache()
+            args.robots = max(32, min(args.max_robots, int(0.6 * total / per_robot) // 32 * 32))
+            print(f"[grad] {per_robot / 2**20:.1f} MiB per robot measured, GPU {total / 2**30:.1f} GiB: "
+                  f"{args.robots} robots", flush=True)
     env = make_env(args.robots)
     policy = MLP(C.OBS_DIM, NA, last_scale=0.01).to(device=args.device, dtype=dtype)
     value = MLP(C.OBS_DIM + 6, 1)       # not used by this learner; kept in the file so the layout is rsl-rl's

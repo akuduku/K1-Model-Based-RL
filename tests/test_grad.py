@@ -70,3 +70,27 @@ def test_checkpointed_gradient_with_noise_pushes_and_changing_delays():
         (g,) = torch.autograd.grad(total + env.terminal_cost().sum(), a)
         grads.append(g)
     assert torch.allclose(grads[0], grads[1], rtol=1e-9, atol=1e-12)
+
+
+def test_window_step_by_step_equals_one_graph():
+    """The learner's window (backward one control step at a time, memory of one step) gives the same action
+    gradients as one graph over the whole window, in the world with noise, pushes and changing delays."""
+    from types import SimpleNamespace
+
+    from mbrl.grad.train import window, window_one_graph
+    from mbrl.mpc.nets import MLP
+    from rl.stand import contract as C
+
+    args = SimpleNamespace(steps=4, clip=3.0, action_noise=0.05, gamma=0.99, terminal_seconds=1.0,
+                           terminal_kinetic=1.0, fall_weight=1.0)
+    world = {"obs_noise": {"gyro": 0.2, "joint_pos": 0.01, "joint_vel": 1.0, "gravity": 0.05}, "push_dv": 0.3,
+             "push_interval_s": (0.02, 0.06), "delay_ms": (10.0, 70.0)}
+    torch.manual_seed(1)
+    policy = MLP(C.OBS_DIM, NA, last_scale=0.5).double()
+    out = []
+    for fn in (lambda e: window(e, policy, args)["g"], lambda e: window_one_graph(e, policy, args)):
+        env = GradStand(3, seed=4, **world)
+        torch.manual_seed(7)
+        out.append(fn(env))
+    assert out[0].shape == (4, 3, NA)
+    assert torch.allclose(out[0], out[1], rtol=1e-8, atol=1e-12), float((out[0] - out[1]).abs().max())

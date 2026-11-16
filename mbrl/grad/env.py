@@ -111,6 +111,23 @@ class GradStand:
         for k in ("actions", "prev_actions", "qd", "prev_qd", "gyro", "v_body"):
             setattr(self, k, getattr(self, k).detach())
 
+    # everything a control step reads, by name; FLOAT_STATE are the parts a derivative flows through
+    FLOAT_STATE = ("q", "p", "xi", "lam", "ring", "last_target", "actions", "qd", "gyro")
+    OTHER_STATE = ("ring_idx", "lag", "contact", "prev_actions", "prev_qd", "v_body")
+
+    def get_state(self) -> dict:
+        pl, fw = self.plant, self.fw
+        return {"q": pl.q, "p": pl.p, "xi": pl.xi, "lam": pl.lam, "ring": fw.ring, "last_target": fw.last_target,
+                "ring_idx": fw.ring_idx, "lag": fw.lag, "actions": self.actions, "qd": self.qd, "gyro": self.gyro,
+                "contact": self.contact, "prev_actions": self.prev_actions, "prev_qd": self.prev_qd, "v_body": self.v_body}
+
+    def set_state(self, state: dict) -> None:
+        pl, fw = self.plant, self.fw
+        pl.q, pl.p, pl.xi, pl.lam = state["q"], state["p"], state["xi"], state["lam"]
+        fw.ring, fw.last_target, fw.ring_idx, fw.lag = state["ring"], state["last_target"], state["ring_idx"], state["lag"]
+        for k in ("actions", "qd", "gyro", "contact", "prev_actions", "prev_qd", "v_body"):
+            setattr(self, k, state[k])
+
     def redraw_lags(self, hold_prob: float = 0.3) -> None:
         """Between control steps: some robots get a new transport delay (as rl/stand's delay_hold_prob)."""
         lo, hi = self.fw_cfg.delay_ms

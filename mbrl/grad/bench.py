@@ -1,7 +1,7 @@
 r"""How fast is a gradient through the pH model?  CPU against GPU, float32 against float64, by number of robots.
 
-One measurement = a window of K control steps with an untrained policy (the robot stays near the home pose),
-forward and backward, with one checkpoint block per control step (memory independent of K).
+One measurement = one training window (mbrl.grad.train.window, the code the training runs) of K control steps with
+an untrained policy: forward without a graph, backward one control step at a time (memory of one step).
 
     python -m mbrl.grad.bench                                   # what this machine has
     python -m mbrl.grad.bench --robots 64 256 1024 --devices cpu cuda --dtypes float32 float64
@@ -30,30 +30,27 @@ from rl.stand import contract as C
 
 
 def measure(device: str, dtype, robots: int, steps: int) -> dict:
-    env = GradStand(robots, device=device, dtype=dtype, checkpoint=True)
+    """One training window (mbrl.grad.train.window: the same code the training runs) with an untrained policy."""
+    from types import SimpleNamespace
+
+    from mbrl.grad.train import OBS_NOISE, window
+
+    env = GradStand(robots, device=device, dtype=dtype, obs_noise=OBS_NOISE, push_dv=0.3, delay_ms=(10.0, 70.0))
     policy = MLP(C.OBS_DIM, NA, last_scale=0.01).to(device=device, dtype=dtype)
+    args = SimpleNamespace(steps=steps, clip=3.0, action_noise=0.05, gamma=0.99, terminal_seconds=1.0,
+                           terminal_kinetic=1.0, fall_weight=1.0)
     cuda = device.startswith("cuda")
-    env.detach()
     if cuda:
         torch.cuda.synchronize()
         torch.cuda.reset_peak_memory_stats()
     t0 = time.time()
-    total = 0.0
-    for _ in range(steps):
-        r, _ = env.step(policy(env.observe()))
-        total = total + r.mean()
-    total = total - env.terminal_cost().mean()
+    w = window(env, policy, args)
     if cuda:
         torch.cuda.synchronize()
-    t1 = time.time()
-    (-total).backward()
-    if cuda:
-        torch.cuda.synchronize()
-    t2 = time.time()
-    grad = torch.cat([p.grad.flatten() for p in policy.parameters()])
+    total = time.time() - t0
     mem = torch.cuda.max_memory_allocated() / 2**30 if cuda else resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 2**20
-    return {"forward": (t1 - t0) / steps, "backward": (t2 - t1) / steps, "rate": robots * steps / (t2 - t0),
-            "mem_GiB": mem, "finite": bool(torch.isfinite(grad).all())}
+    return {"forward": w["stats"]["seconds_forward"] / steps, "backward": w["stats"]["seconds_backward"] / steps,
+            "rate": robots * steps / total, "mem_GiB": mem, "finite": bool(torch.isfinite(w["g"]).all())}
 
 
 def main():
@@ -61,7 +58,7 @@ def main():
     ap.add_argument("--robots", type=int, nargs="+", default=[8, 32])
     ap.add_argument("--devices", nargs="+", default=["cpu"] + (["cuda"] if torch.cuda.is_available() else []))
     ap.add_argument("--dtypes", nargs="+", default=["float32", "float64"])
-    ap.add_argument("--steps", type=int, default=3, help="control steps per measurement")
+    ap.add_argument("--steps", type=int, default=20, help="control steps per window, as in the training")
     ap.add_argument("--threads", type=int, default=0)
     ap.add_argument("--trace", action="store_true", help="print the traceback of a failing row (and run CUDA blocking)")
     args = ap.parse_args()
