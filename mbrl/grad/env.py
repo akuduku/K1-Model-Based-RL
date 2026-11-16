@@ -25,6 +25,7 @@ from mbrl import paths  # noqa: F401  (puts Full Body on sys.path)
 from ph_k1 import firmware as fwm
 from ph_k1.model import load_k1
 from ph_k1.plant import K1PHPlant, Ledger
+from ph_k1 import solve as ph_solve
 from rl.stand import contract as C
 from rl.stand.env import REWARDS
 
@@ -49,6 +50,7 @@ class GradStand:
         self.device, self.dtype = torch.device(device), dtype
         self.obs_noise, self.push_dv, self.push_interval_s = obs_noise or {}, push_dv, push_interval_s
         self.gen = torch.Generator().manual_seed(seed)          # on the CPU: the same draws on every device
+        ph_solve.probe(self.device, robots, dtype=dtype)       # a GPU without batched solves: solve on the CPU
         self.model = load_k1(dtype=dtype, device=self.device)
         self.plant = K1PHPlant(model=self.model, batch=robots, timestep=POLICY_DT / SUBSTEPS)
         # the lag is drawn here (redraw_lags), not inside policy_step: a recomputed control step must repeat exactly
