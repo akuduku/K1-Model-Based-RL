@@ -69,7 +69,7 @@ def start_states(rp: Replay, theta: torch.Tensor) -> tuple[np.ndarray, np.ndarra
     plant = rp.plant
     n = rp.B // rp.W
     rep = lambda x: rp._rep(x, n)  # noqa: E731
-    set_state(plant, rep(rp.th0), rep(rp.qd0), rep(rp.quat0), rep(rp.gyro0))
+    set_state(plant, rep(rp.th0), rep(rp.qd0), rep(rp.quat0), rep(rp.gyro0), stance_velocity=rp.stance_velocity)
     kin = plant.kinematics()
     nu = plant.velocity(kin)
     J = point_jacobian(kin, torch.tensor([0]), kin.pos[:, 0][:, None])[:, 0]  # the trunk origin's world velocity
@@ -120,6 +120,48 @@ def replay_mujoco(rp: Replay, delay_ms: float, self_collision: bool = False) -> 
             gr_pred[w, k] = projected_gravity(q)[0].numpy()
     T = lambda x: torch.as_tensor(x, dtype=torch.float64)  # noqa: E731
     return errors(rp, T(th_pred), T(gy_pred), T(gr_pred))
+
+
+def mujoco_trajectories(rp: Replay, delay_ms: float, self_collision: bool = False) -> dict:
+    """What Replay.run(keep_traj=True) keeps, from MuJoCo: theta, qd, gyro, grav, tau (W,H,...), NaN from the step a
+    window diverges.  For full-rate logs (rp.low): the logged command and gains go straight to the motor driver, one
+    command per replay step; the PD law and its torque limit are MuJoCoBackend.step's."""
+    import mujoco
+
+    qpos0, qvel0 = start_states(rp, ParamSpace().neutral(1))
+    b = MuJoCoBackend(load_k1(), delay_ms=delay_ms, gain_preset="standup", slew=rp.cfg.slew)
+    m, d = b.m, b.d
+    if not self_collision:
+        floor_only(m)
+    if abs(m.opt.timestep - rp.h) > 1e-12:
+        raise ValueError("MuJoCo's step and the plant's differ")
+    W, H, sub = rp.W, rp.H, rp.substeps
+    hist, target = rp.hist.cpu().numpy(), rp.target.cpu().numpy()
+    kp, kd = rp.base_kp.cpu().numpy(), rp.base_kd.cpu().numpy()
+    out = {"theta": np.full((W, H, 22), np.nan), "qd": np.full((W, H, 22), np.nan), "gyro": np.full((W, H, 3), np.nan),
+           "grav": np.full((W, H, 3), np.nan), "tau": np.full((W, H, 22), np.nan)}
+    for w in range(W):
+        mujoco.mj_resetData(m, d)
+        d.qpos[:] = qpos0[w]
+        d.qvel[:] = qvel0[w]
+        put_on_floor(m, d)
+        mujoco.mj_forward(m, d)
+        ring = deque([hist[w, k].copy() for k in range(b.lag - 1, -1, -1)], maxlen=b.lag + 1)
+        for k in range(H):
+            for _ in range(sub):
+                ring.append(target[w, k])
+                q, v = d.qpos[7:], d.qvel[6:]
+                tau = kp[w] * (ring[0] - q) - kd[w] * v
+                available = np.maximum((b.v_max - b.k * v * np.sign(tau)) * b.k / b.R, 0.0)
+                cap = np.minimum(available, b.tau_max)
+                d.ctrl[:] = np.clip(tau, -cap, cap)
+                mujoco.mj_step(m, d)
+            if not b.healthy():
+                break
+            out["theta"][w, k], out["qd"][w, k], out["gyro"][w, k] = d.qpos[7:], d.qvel[6:], d.qvel[3:6]
+            out["grav"][w, k] = projected_gravity(torch.as_tensor(d.qpos[3:7])[None])[0].numpy()
+            out["tau"][w, k] = d.ctrl
+    return out
 
 
 def errors(rp: Replay, th_pred, gy_pred, gr_pred) -> dict:

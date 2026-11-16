@@ -31,6 +31,7 @@ from ph_k1.model import NB, NJ, NV, load_k1
 from ph_k1.native import K1PHPlantNative
 
 POLICY_DT = 0.02
+LEGS = list(range(10, 22))
 JOINT_WEIGHT = {"head": 0.25, "arm": 0.5, "hip": 1.0, "knee": 1.0, "ankle": 1.0}
 
 
@@ -46,7 +47,7 @@ def make_windows(logs: list[RobotLog], horizon: int = 20, stride_s: float = 0.1,
     start where the accelerometer is not in an impact (| |acc| - g | < max_acc_dev: the tilt estimate is good)."""
     out = []
     for li, L in enumerate(logs):
-        sub = round(POLICY_DT / L.dt)
+        sub = round(L.step_dt / L.dt)
         hist = int(np.ceil(history_s / L.dt))
         last = None
         for s in L.cmd_change:
@@ -71,9 +72,19 @@ def make_windows(logs: list[RobotLog], horizon: int = 20, stride_s: float = 0.1,
 class Replay:
     def __init__(self, logs: list[RobotLog], windows: list[Window], space: ParamSpace | None = None,
                  n_candidates: int = 32, horizon: int = 20, device: str = "cpu", dtype=torch.float64,
-                 plant_dt: float = 1e-3, max_delay_ms: float = 100.0, w_gyro: float = 0.02, w_grav: float = 1.0):
+                 plant_dt: float = 1e-3, max_delay_ms: float = 100.0, w_gyro: float = 0.02, w_grav: float = 1.0,
+                 delay_ms: float | None = None, stance_velocity: bool = True):
+        """delay_ms: one actuation delay for every robot instead of the candidates' own (full-rate logs: measured).
+        Logs with their own gains (RobotLog.kp, mbrl/lowlog.py) hold what the motor drivers received, so their
+        commands skip the firmware filter and every step is one logged command (RobotLog.step_dt)."""
         if not windows:
             raise ValueError("no windows")
+        used = [logs[i] for i in sorted({w.log for w in windows})]
+        if len({L.step_dt for L in used}) != 1 or len({L.kp is None for L in used}) != 1:
+            raise ValueError("all logs of one Replay must be of one kind (step_dt, own gains or a preset)")
+        self.step_dt = used[0].step_dt
+        self.low = used[0].kp is not None
+        self.delay_ms, self.stance_velocity = delay_ms, stance_velocity
         slews = {logs[w.log].meta.slew for w in windows}
         if len(slews) != 1:
             raise ValueError("all logs of one Replay must share the slew switch (it is a batch-wide setting)")
@@ -84,11 +95,15 @@ class Replay:
         self.B = self.n_per_batch * self.W
         self.dtype, self.device = dtype, torch.device(device)
         self.h = plant_dt
-        self.substeps = round(POLICY_DT / plant_dt)
+        self.substeps = round(self.step_dt / plant_dt)
         self.w_gyro, self.w_grav = w_gyro, w_grav
         model = load_k1(dtype=dtype, device=self.device)
         self.cfg = FirmwareConfig(gains="standup", slew=slews.pop(), delay_ms=(20.0, 20.0), max_delay_ms=max_delay_ms,
-                                  policy_dt=POLICY_DT)
+                                  policy_dt=self.step_dt)
+        if self.low:
+            self.cfg = FirmwareConfig(gains="standup", pos_clamp=False, slew=False, target_clamp=False,
+                                      overspeed_guard=False, delay_ms=(20.0, 20.0), max_delay_ms=max_delay_ms,
+                                      policy_dt=self.step_dt)
         self.plant = K1PHPlantNative(model=model, batch=self.B, timestep=plant_dt, firmware=self.cfg)
         self.D = fw.delay_line_length(self.cfg, plant_dt)
         self._tensors(model)
@@ -98,24 +113,34 @@ class Replay:
         T = lambda a: torch.as_tensor(np.asarray(a), dtype=self.dtype, device=self.device)  # noqa: E731
         H, D = self.H, self.D
         th0, qd0, quat0, gy0, prev, hist, tgt, th, gy, gr, kp, kd = ([] for _ in range(12))
+        qd_o, tau_o = [], []
         for w in self.windows:
             L = self.logs[w.log]
-            sub = round(POLICY_DT / L.dt)
+            sub = round(L.step_dt / L.dt)
             s = w.start
             th0.append(L.q[s]); qd0.append(L.qd[s]); quat0.append(L.quat[s]); gy0.append(L.gyro[s])
             prev.append(L.cmd[s - 1])
             # delay line: the command held (d+1) plant steps before the window, d = 0 .. D-1
             back = s - np.ceil((np.arange(D) + 1) * self.h / L.dt - 1e-9).astype(int)
             hist.append(L.cmd[np.clip(back, 0, None)])
-            idx_t = np.minimum(s + np.arange(H) * sub + 1, len(L) - 1)      # the new command of each step
+            # the new command of each step (a full-rate log has one per grid sample: the one in force at its start)
+            idx_t = np.minimum(s + np.arange(H) * sub + (1 if sub > 1 else 0), len(L) - 1)
             idx_o = s + (np.arange(H) + 1) * sub                            # the state after each step
             tgt.append(L.cmd[idx_t]); th.append(L.q[idx_o]); gy.append(L.gyro[idx_o]); gr.append(L.grav[idx_o])
-            k_p, k_d = fw.gains(model, L.meta.gains)
-            kp.append(k_p.cpu().numpy()); kd.append(k_d.cpu().numpy())
+            qd_o.append(L.qd[idx_o])
+            tau_o.append(L.tau[idx_o] if L.tau is not None else np.full((H, NJ), np.nan))
+            if L.kp is not None:
+                kp.append(L.kp[s]); kd.append(L.kd[s])
+                if np.abs(L.kp[s:idx_o[-1] + 1] - L.kp[s]).max() > 0 or np.abs(L.kd[s:idx_o[-1] + 1] - L.kd[s]).max() > 0:
+                    raise ValueError(f"{L.name}: the gains change inside a window (not modelled)")
+            else:
+                k_p, k_d = fw.gains(model, L.meta.gains)
+                kp.append(k_p.cpu().numpy()); kd.append(k_d.cpu().numpy())
         self.th0, self.qd0, self.quat0, self.gyro0 = T(th0), T(qd0), T(quat0), T(gy0)
         self.prev_cmd, self.hist = T(prev), T(hist)                   # (W,22), (W,D,22)
         self.target, self.obs_theta, self.obs_gyro, self.obs_grav = T(tgt), T(th), T(gy), T(gr)  # (W,H,...)
         self.base_kp, self.base_kd = T(kp), T(kd)
+        self.obs_qd, self.obs_tau = T(qd_o), T(tau_o)                 # (W,H,22); tau is NaN without a torque log
         jw = torch.tensor([JOINT_WEIGHT[GROUP_OF_JOINT[k]] for k in range(NJ)], dtype=self.dtype, device=self.device)
         self.joint_w = jw / jw.sum()
 
@@ -133,8 +158,11 @@ class Replay:
         pl.robot_params = cand(sp.robot_params(theta)).contiguous()
         kps, kds = sp.gain_scales(theta)
         kp, kd = (rep(self.base_kp) * cand(kps)).contiguous(), (rep(self.base_kd) * cand(kds)).contiguous()
-        set_state(pl, rep(self.th0), rep(self.qd0), rep(self.quat0), rep(self.gyro0))
-        lag = torch.round(cand(sp.delay_ms(theta)) * 1e-3 / self.h).clamp(0, self.D - 1).long()
+        set_state(pl, rep(self.th0), rep(self.qd0), rep(self.quat0), rep(self.gyro0),
+                  stance_velocity=self.stance_velocity, preload=self.low)
+        delay = cand(sp.delay_ms(theta)) if self.delay_ms is None else torch.full((pl.B,), float(self.delay_ms),
+                                                                                 dtype=self.dtype, device=self.device)
+        lag = torch.round(delay * 1e-3 / self.h).clamp(0, self.D - 1).long()
         pl.lag = lag.to(torch.int32)
         pl.ring = rep(self.hist).flip(1).contiguous()          # ring[D-1-d] = command d+1 steps ago, write index 0
         pl.ring_idx = torch.zeros(pl.B, dtype=torch.int32, device=self.device)
@@ -147,6 +175,7 @@ class Replay:
         gy_pred = torch.empty(pl.B, H, 3, dtype=self.dtype, device=self.device)
         gr_pred = torch.empty(pl.B, H, 3, dtype=self.dtype, device=self.device)
         qd_pred = torch.empty(pl.B, H, NJ, dtype=self.dtype, device=self.device) if keep_traj else None
+        tau_pred = torch.empty(pl.B, H, NJ, dtype=self.dtype, device=self.device) if keep_traj else None
         targets = rep(self.target)
         for k in range(H):
             gen = None
@@ -161,6 +190,7 @@ class Replay:
             gr_pred[:, k] = projected_gravity(pl.q[:, 3:7])
             if keep_traj:
                 qd_pred[:, k] = info.extra["nu"][:, NB:]
+                tau_pred[:, k] = info.torque
         e_th = (th_pred - rep(self.obs_theta)) ** 2            # (B,H,22)
         e_gy = ((gy_pred - rep(self.obs_gyro)) ** 2).sum(-1)    # (B,H)
         e_gr = ((gr_pred - rep(self.obs_grav)) ** 2).sum(-1)
@@ -180,6 +210,8 @@ class Replay:
             out["theta"] = th_pred.view(n, W, H, NJ)
             out["gyro"] = gy_pred.view(n, W, H, 3)
             out["qd"] = qd_pred.view(n, W, H, NJ)
+            out["grav"] = gr_pred.view(n, W, H, 3)
+            out["tau"] = tau_pred.view(n, W, H, NJ)
         return out
 
     def run(self, theta: torch.Tensor, residual=None, keep_traj: bool = False) -> dict:

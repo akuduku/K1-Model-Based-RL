@@ -61,6 +61,12 @@ class RobotLog:
     cmd_change: np.ndarray  # (P,) grid indices of the policy steps
     quat: np.ndarray = field(default=None)  # (T, 4) w x y z, trunk -> world, yaw-free
     grav: np.ndarray = field(default=None)  # (T, 3) unit gravity in the trunk frame
+    # full-rate logs (mbrl/lowlog.py) only; None for the CSV logs above
+    step_dt: float = 0.02          # the time between two commands the replay feeds (the policy step; LowCmd logs: dt)
+    kp: np.ndarray = field(default=None)   # (T, 22) the gains the motor drivers got with the command
+    kd: np.ndarray = field(default=None)
+    tau: np.ndarray = field(default=None)  # (T, 22) the motors' own torque estimate (tau_est)
+    extra: dict = field(default_factory=dict)
 
     def __len__(self):
         return len(self.t)
