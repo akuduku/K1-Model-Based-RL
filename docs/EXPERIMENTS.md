@@ -270,8 +270,28 @@ so autograd runs through it **without any change to the plant**.
   one job at a time: `python -m mbrl.grad.refine --policy outputs/kaggle/mb-stand-v1/runs/mb-stand-v1/model_260.pt
   --threads 2 --robots 8 --steps 10 --lr 2e-5 --value --minutes 25 --save-every 20 --run-name grad-stand-f`, then
   score `logs/grad-stand-f/deploy_<it>.bin` with `Full Body/rl/stand/evaluate.py`.
-- Status: an investigated alternative.  It becomes a method only if the `--value` run lowers the power without
-  falls, and then it still needs derivative code in the C++/CUDA plant (or the Python plant on a GPU).
+- **Decision of 16 Nov (evening): this is the thesis method.**  It is the professor's formula as written
+  (`MA/ph_formula_rl_mbrl.pdf`): minimise L = term 1 (running cost) + term 2 (cost at the end) over the controller's
+  weights, through the pH model.  The planner (`mbrl/mpc`) and PPO on pH are comparison rows.
+- What was wrong with the first learner: no term 2 (it only saw the next 0.2 s), an uncontrolled step, and later
+  one sign error of mine in the controlled step (fixed; `refine.py` comments it).
+- Now in the code (`mbrl/grad/env.py`, `refine.py`, `train.py`): **term 2** = `GradStand.terminal_cost`: kinetic
+  energy 1/2 p^T M^-1 p at the end of the window plus pose, tilt and height error; **controlled step** = action
+  targets y = a + delta * g / RMS(g), the network is fitted to them, each robot's g at most 3 x the batch median;
+  **memory** = one `torch.utils.checkpoint` block per control step (`tests/test_grad.py`: same gradient);
+  any device and precision.
+- Refinement test with term 2 and the controlled step (`grad-stand-prof`: from `model_260.pt`, 8 robots, window 20,
+  delta 0.03): inside its own windows the cost falls (reward per step -0.016 -> -0.010 in 8 updates), but the
+  checkpoint after 10 updates **falls from the start pose after 1.5 s, on the C++ plant and on the Python plant
+  alike** (the original stands).  So it is not a difference between the plants: 8 robots that only ever continue a
+  steady stand are too narrow a set of states; the network forgets the start.  A refinement on 8 robots cannot
+  answer more.  The learner for the real run therefore restarts robots at staggered times, and has noise and pushes.
+- `python -m mbrl.grad.train` = standing **from scratch** with this method (the world of the other rows, scoring on
+  the C++ plant).  Kaggle tasks: `TASK=grad-bench kaggle/run.sh HOURS=1` (speed and memory, GPU against CPU; run
+  it first, its numbers set `GRAD_ROBOTS`), `TASK=grad-stand kaggle/run.sh HOURS=6 RUN_NAME=grad-stand-v1`.
+- Speed, measured on the laptop: about 4 robot-control-steps per second with gradient (one thread).  Ways up, in
+  this order: the T4 with many robots (to be measured by `grad-bench`); sole contacts only and 2 ms steps in the
+  gradient plant; derivative code in the C++/CUDA plant (the large work package).
 
 ### Package 6: walking, both arms (medium + ~7 h of Kaggle per run)
 - Do: `Full Body/rl/walk/{env,train,evaluate}.py`: Eric's walk task and rewards on the pH plant, ported from

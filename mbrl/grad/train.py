@@ -183,8 +183,9 @@ def main():
     budget = max(args.minutes, 60 * args.hours)
     t0 = time.time()
     last = {"save": t0, "eval": t0}
-    age = torch.zeros(args.robots, device=env.device)
     max_age = round(args.episode_s / POLICY_DT)
+    # staggered ages: every window contains robots that have just started, not only robots in the middle of a stand
+    age = torch.rand(args.robots, device=env.device) * max_age
     falls = 0
     with open(run_dir / "metrics.jsonl", "a") as metrics:
         try:
