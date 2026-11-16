@@ -116,7 +116,9 @@ class GradStand:
             return
         redraw = self._rand((self.B,)) >= hold_prob
         if bool(redraw.any()):
-            self.fw.lag[redraw] = fwm.draw_lags(self.fw_cfg, int(redraw.sum()), self.plant.h, self.device).long()
+            lag = self.fw.lag.clone()       # a new tensor: the old one belongs to control steps already taken
+            lag[redraw] = fwm.draw_lags(self.fw_cfg, int(redraw.sum()), self.plant.h, self.device).long()
+            self.fw.lag = lag
 
     def draw_pushes(self) -> torch.Tensor | None:
         """rl/stand's pushes: now and then a horizontal change of the trunk velocity.  -> (B,3) or None."""
@@ -154,7 +156,7 @@ class GradStand:
         return torch.cat((self.observe(noise=False), self.v_body, q[:, 2:3] - self.stand_height, feet), -1)
 
     # ------------------------------------------------------------------ one control step, as a function
-    def _advance(self, a, push, q, p, xi, lam, ring, ring_idx, last_target, actions, qd):
+    def _advance(self, a, push, lag, q, p, xi, lam, ring, ring_idx, last_target, actions, qd):
         """(action, push, state before) -> (reward, copper watts, reward terms, contacts, state after).
 
         Everything it reads comes in through the arguments, so torch.utils.checkpoint can run it again in the
@@ -162,6 +164,7 @@ class GradStand:
         pl, fw = self.plant, self.fw
         pl.q, pl.p, pl.xi, pl.lam = q, p, xi, lam
         fw.ring, fw.ring_idx, fw.last_target = ring.clone(), ring_idx, last_target   # policy_step writes the ring in place
+        fw.lag = lag            # this step's transport delays (redraw_lags changes fw.lag between steps)
         pl.ledger = Ledger.zeros(self.B, pl.dtype, pl.device)
         info = fw.policy_step(self.contract.decode(a), SUBSTEPS, push_dv=push)
         nu = pl.velocity()
@@ -192,11 +195,12 @@ class GradStand:
         pl, fw = self.plant, self.fw
         if push is None:
             push = self._z(3)
+        lag = fw.lag.clone()    # a copy: a recomputed step must see the delays it had
         state = (pl.q, pl.p, pl.xi, pl.lam, fw.ring, fw.ring_idx, fw.last_target, self.actions, self.qd)
         if self.use_checkpoint and torch.is_grad_enabled():
-            out = torch_checkpoint(self._advance, a, push, *state, use_reentrant=False)
+            out = torch_checkpoint(self._advance, a, push, lag, *state, use_reentrant=False)
         else:
-            out = self._advance(a, push, *state)
+            out = self._advance(a, push, lag, *state)
         reward, copper_w, weighted, self.contact = out[:4]
         pl.q, pl.p, pl.xi, pl.lam, fw.ring, fw.ring_idx, fw.last_target = out[4:11]
         self.prev_qd, self.prev_actions = self.qd, self.actions

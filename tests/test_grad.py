@@ -50,3 +50,23 @@ def test_checkpointed_gradient_is_the_same():
         (g,) = torch.autograd.grad(window_cost(make(ck), a), a)
         grads.append(g)
     assert torch.allclose(grads[0], grads[1], rtol=1e-9, atol=1e-12)
+
+
+def test_checkpointed_gradient_with_noise_pushes_and_changing_delays():
+    """The randomised world: every control step is recomputed in the backward pass and must repeat exactly."""
+    world = {"obs_noise": {"gyro": 0.2, "joint_pos": 0.01}, "push_dv": 0.3, "push_interval_s": (0.02, 0.06),
+             "delay_ms": (10.0, 70.0)}
+    grads = []
+    for ck in (False, True):
+        env = GradStand(2, seed=3, checkpoint=ck, **world)
+        torch.manual_seed(0)
+        a = (0.05 * torch.randn(4, 2, NA, dtype=torch.float64)).requires_grad_(True)
+        env.detach()
+        total = 0.0
+        for k in range(4):
+            env.redraw_lags(hold_prob=0.0)
+            r, _ = env.step(a[k], env.draw_pushes())
+            total = total - r.sum()
+        (g,) = torch.autograd.grad(total + env.terminal_cost().sum(), a)
+        grads.append(g)
+    assert torch.allclose(grads[0], grads[1], rtol=1e-9, atol=1e-12)
