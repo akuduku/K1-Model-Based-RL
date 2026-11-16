@@ -306,7 +306,13 @@ so autograd runs through it **without any change to the plant**.
   Kaggle CPU (2 threads, float32, `grad-bench` of 16 Nov): 64 robots 24.5, 256 robots 38.5 robot-steps/s, 3.5 GiB.
   Kaggle T4: failed at first: PyTorch 2.11+cu130 has no GPU code for batched `torch.linalg.solve` on a T4
   ("no kernel image").  Since Full Body e135c25 the plant's solves go through `ph_k1/solve.py`, which solves on the
-  CPU when the GPU cannot (`probe`); result of the benchmark with it: see below.
+  CPU when the GPU cannot (`probe`).  With it (`grad-bench` run 3, T4, float32, robot-control-steps per second
+  with gradient / GPU memory): 64 robots 19.9 / 0.9 GiB; 256 robots 66.9 / 3.6 GiB; 1024 robots 154.7 / 14.2 GiB
+  (too close to the T4's 15 GiB).  Memory is about 14 MB per robot, so 512 robots need about 7 GiB (not measured).
+  For comparison: the C++ plant runs about 11 600 steps per second forwards on the same GPU.
+- Launched on 16 Nov, 22:45: `TASK=grad-stand kaggle/run.sh HOURS=6 RUN_NAME=grad-stand-v1 GRAD_DEVICE=cuda
+  GRAD_ROBOTS=512` (window 20, delta 0.05 -> 0.01, W&B "Akos pH MB").  Fetch:
+  `KERNEL_SLUG=mbrl-k1-grad-stand TASK=grad-stand kaggle/fetch.sh grad-stand-v1`.
 - Ways to more speed, in this order: the T4 with many robots; sole contacts only and 2 ms steps in the gradient
   plant; derivative code in the C++/CUDA plant (the large work package).
 
