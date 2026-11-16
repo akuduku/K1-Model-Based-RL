@@ -24,6 +24,7 @@ kaggle/run.sh overrides the settings below:
     TASK=kick-mbrl kaggle/run.sh HOURS=8                      # both in one session
     TASK=mb-stand kaggle/run.sh HOURS=6 RUN_NAME=mb-stand-v1  # the model-based learner (mbrl.mpc) on standing
     TASK=grad-bench kaggle/run.sh HOURS=1                     # speed of gradients through the pH plant (mbrl.grad.bench)
+    TASK=grad-stand kaggle/run.sh HOURS=6 RUN_NAME=grad-stand-v1 GRAD_ROBOTS=256   # the professor's formula, from scratch
 
 The kick tasks: kick-plan runs `python -m mbrl.kick.plan` (CEM over the kick plan of mbrl/kick/controller.py, one
 search per ball speed in KICK_SPEEDS, through the walk policy WALK), kick-track runs `python -m mbrl.kick.train --plan
@@ -86,6 +87,10 @@ KICK_WANDB_PROJECT = "Akos pH Kick MBRL"
 MB_ROBOTS = 256                           # mb-*: world robots of the model-based learner (mbrl.mpc)
 MB_CANDIDATES = 8                         # mb-*: model copies per world robot
 MB_HORIZON = 5                            # mb-*: planner steps of 20 ms
+GRAD_ROBOTS = 256                         # grad-stand: robots of the gradient learner (mbrl.grad.train); set from grad-bench
+GRAD_STEPS = 20                           # grad-stand: control steps per window
+GRAD_DEVICE = "cuda"                      # grad-stand: where the Python pH plant runs
+GRAD_DTYPE = "float32"                    # grad-stand
 MB_WANDB_PROJECT = "Akos pH MB"
 RESUME = ""                               # W&B run (name or id) in WANDB_PROJECT to continue from; "" = fresh
 SESSION_HOURS = 11.0                      # our own cap, 1 h under Kaggle's 12 h (kaggle/run.sh pushes with the same
@@ -197,7 +202,7 @@ def main():
         raise SystemExit(f"TASK={TASK!r}: stand, getup, getup-plan, getup-track, getup-mbrl, kick-plan, kick-track, "
                          "kick-mbrl, mb-stand, grad-bench or grad-stand")
     d = TASK_DEFAULTS[TASK]
-    run_name = RUN_NAME or (f"{TASK}-v1" if TASK.startswith(("getup-", "kick-", "mb-")) else f"{TASK}-mb-v1")
+    run_name = RUN_NAME or (f"{TASK}-v1" if TASK.startswith(("getup-", "kick-", "mb-", "grad-")) else f"{TASK}-mb-v1")
     project = KICK_WANDB_PROJECT if TASK.startswith("kick-") else WANDB_PROJECT
     iterations = ITERATIONS or d["iterations"]
     video_every = d["video_every"] if VIDEO_EVERY < 0 else VIDEO_EVERY
@@ -303,6 +308,13 @@ def main():
         go([py, "-u", "-m", "mbrl.grad.bench", "--devices", "cuda", "--robots", 64, 256, 1024, 2048, "--steps", 3],
            "benchmark (GPU)")
         go([py, "-u", "-m", "mbrl.grad.bench", "--devices", "cpu", "--robots", 64, 256, "--steps", 2], "benchmark (CPU)")
+    elif TASK == "grad-stand":
+        # the professor's formula: standing from scratch with derivatives of the cost through the pH model
+        go([py, "-u", "-m", "mbrl.grad.train", "--run-name", run_name, "--robots", GRAD_ROBOTS, "--steps", GRAD_STEPS,
+            "--device", GRAD_DEVICE, "--dtype", GRAD_DTYPE, "--minutes", f"{max(budget, 1):.1f}",
+            "--save-every-min", SAVE_EVERY_MIN, "--eval-every-min", 20, "--eval-robots", 128,
+            "--log-root", WORK / "runs", "--wandb-project", MB_WANDB_PROJECT, "--wandb-entity", WANDB_ENTITY,
+            *(["--resume", RESUME] if RESUME else []), *TRAIN_ARGS.split()], "training")
     elif TASK.startswith("mb-"):
         # the model-based learner: plan in the pH model, learn policy and value; resume = a checkpoint path in the repo
         go([py, "-m", "mbrl.mpc.train", TASK[3:], "--run-name", run_name, "--robots", MB_ROBOTS,
