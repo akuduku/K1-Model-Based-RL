@@ -46,9 +46,9 @@ class GradWalk(GradEnv):
     without it the task draws its own (x `command_scale`: 0 = stand, 1 = Eric's ranges).
     """
 
-    FLOAT_STATE = (("q", "p", "xi", "lam", "ring", "last_target", "actions", "prev_actions", "qd", "gyro")
+    FLOAT_STATE = (("q", "p", "xi", "lam", "ring", "last_target", "actions", "prev_actions", "qd", "gyro", "critic_extra")
                    + tuple(f"mem:{k}" for k in FLOAT_MEMORY))
-    ENV_KEYS = ("actions", "prev_actions", "qd", "gyro", "contact", "contact_force", "fresh")
+    ENV_KEYS = ("actions", "prev_actions", "qd", "gyro", "contact", "contact_force", "critic_extra", "fresh")
 
     def __init__(self, robots: int, seed: int = 1, joint_noise: float = 0.0, device="cpu", dtype=torch.float64,
                  obs_noise: dict | None = None, push_dv: float = 0.0, push_interval_s=(1.5, 4.0),
@@ -74,6 +74,15 @@ class GradWalk(GradEnv):
 
     def _task_rand(self, *shape) -> torch.Tensor:
         return self._rand(shape)
+
+    def _rest_critic(self, q: torch.Tensor, air_time: torch.Tensor) -> torch.Tensor:
+        """The critic's extras of robots that just started: at rest, both feet down, no force yet (rl/walk/env.py)."""
+        n, m = q.shape[0], self.model
+        zero = torch.zeros(n, m.ncontact, dtype=self.dtype, device=self.device)
+        rest = self.task.signals(q, torch.zeros(n, 28, dtype=self.dtype, device=self.device),
+                                 torch.zeros(n, NA, dtype=self.dtype, device=self.device), zero + self.task.sole.sum(0),
+                                 zero[..., None].expand(-1, -1, 3))
+        return self.task.critic_extra(rest, {"air_time": air_time})
 
     # ------------------------------------------------------------------ state
     def _start(self, n: int):
@@ -101,6 +110,7 @@ class GradWalk(GradEnv):
             self.contact_force = torch.zeros(self.B, m.ncontact, 3, dtype=self.dtype, device=self.device)
             self.fresh = torch.ones(self.B, dtype=torch.bool, device=self.device)
             self.mem = self.task.reset_memory(self.mem, torch.arange(self.B, device=self.device), self._task_rand)
+            self.critic_extra = self._rest_critic(self.plant.q, self.mem["air_time"])
         else:
             ids = ids.reshape(-1)
             if ids.numel() == 0:
@@ -116,6 +126,9 @@ class GradWalk(GradEnv):
                 t[ids] = value
                 setattr(self, name, t)
             self.mem = self.task.reset_memory(self.mem, ids, self._task_rand)
+            extra = self.critic_extra.clone()
+            extra[ids] = self._rest_critic(self.plant.q[ids], self.mem["air_time"][ids])
+            self.critic_extra = extra
         if self.command is not None:
             self.mem = self.task.set_command(self.mem, self.command)
 
@@ -171,9 +184,9 @@ class GradWalk(GradEnv):
 
     def critic_obs(self) -> torch.Tensor:
         """rl/walk/env.py's critic input: the clean observation and the task's extras (trunk velocity, foot heights,
-        air times, contacts, forces)."""
-        sig, _ = self._signals(self.qd)
-        return torch.cat((self.observe(noise=False), self.task.critic_extra(sig, self.mem)), -1)
+        air times, contacts, forces), the extras as the last step left them (part of the state, so a derivative of
+        the critic's input reaches back into that step)."""
+        return torch.cat((self.observe(noise=False), self.critic_extra), -1)
 
     # ------------------------------------------------------------------ one control step
     def step(self, a: torch.Tensor, push: torch.Tensor | None = None):
@@ -191,6 +204,7 @@ class GradWalk(GradEnv):
         terminated = self.task.fallen(sig)
         terms, self.mem = self.task.terms(sig, self.mem, a, self.actions, self.prev_actions, supplied_w, terminated)
         reward = self.task.reward(terms, only=self.smooth)
+        self.critic_extra = self.task.critic_extra(sig, self.mem)
         self.prev_actions, self.actions = self.actions, a
         self.qd, self.gyro = nu[:, 6:], info.extra["gyro"]
         self.sig = sig
@@ -210,23 +224,34 @@ class GradWalk(GradEnv):
         Charged: the STATE_TERMS of the running cost (speed and yaw-rate tracking, upright, posture, spacing), each
         as its distance from the best value it can have.  A place holder until the learned value of roadmap W3;
         `kinetic` is not used (a walking robot is not at rest).  -> (B,) >= 0."""
+        return seconds * self.state_costs().sum(-1)
+
+    STATE_COSTS = STATE_TERMS
+
+    def state_costs(self) -> torch.Tensor:
+        """(B, len(STATE_TERMS)) >= 0: what each of the STATE_TERMS costs per second at the current state, as its
+        distance from its best value (a reward between 0 and 1: what is missing to 1, x its weight; a penalty:
+        itself, x its weight).  Term 2 is a weighted sum of these."""
         sig, _ = self._signals(self.qd)
         zero = torch.zeros(self.B, dtype=self.dtype, device=self.device)
         terms, _ = self.task.terms(sig, self.mem, self.actions, self.actions, self.actions, zero, zero.bool())
-        cost = zero
+        cols = []
         for k in STATE_TERMS:
             w = self.task.rewards.get(k, 0.0)
-            if w > 0:
-                cost = cost + w * (1.0 - terms[k])       # a reward between 0 and 1: what is missing to 1
-            elif w < 0:
-                cost = cost - w * terms[k]               # a penalty: itself
-        return seconds * cost
+            cols.append(w * (1.0 - terms[k]) if w > 0 else -w * terms[k] if w < 0 else zero)
+        return torch.stack(cols, -1)
+
+    @staticmethod
+    def fixed_term2_weights(seconds: float = 1.0, kinetic: float = 0.0) -> tuple:
+        """The weights of STATE_COSTS that give terminal_cost(seconds)."""
+        return (seconds,) * len(STATE_TERMS)
 
     def fallen(self) -> torch.Tensor:
-        """The firmware's tilt abort or the trunk down.  (A body other than a foot on the ground also ends an
-        episode: step()'s log["terminated"] has all three.)"""
+        """The episode ends (rl/walk/task.py fallen): the firmware's tilt abort, a body other than a foot on the
+        ground, or the trunk down."""
         q = self.plant.q.detach()
-        return (self.contract.roll_pitch(q[:, 3:7]).abs() > C.TILT_ABORT).any(-1) | (q[:, 2] < C.FALL_HEIGHT)
+        ground = (self.contact.detach() @ self.task.not_sole) > 0
+        return (self.contract.roll_pitch(q[:, 3:7]).abs() > C.TILT_ABORT).any(-1) | ground | (q[:, 2] < C.FALL_HEIGHT)
 
 
 __all__ = ["GradWalk", "NA", "OBS_NOISE", "REWARDS", "STATE_TERMS"]

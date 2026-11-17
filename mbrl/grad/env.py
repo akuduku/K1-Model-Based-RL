@@ -10,7 +10,8 @@ reaches from the cost back to the network's weights:
     observation (rl/stand/contract.py) -> policy -> decode -> firmware chain (clamp, slew, delay, motor driver)
     -> 20 plant steps of 1 ms -> the smooth reward terms of rl/stand/env.py
 
-Left out of the reward: the terms without a derivative (alive, feet_grounded, undesired_contacts, termination).
+Left out of the differentiated reward: the terms without a derivative (alive, feet_grounded, undesired_contacts,
+termination); step() reports the full reward too (info["reward_all"]), for the learned value of term 2 (value.py).
 
 Memory: with `checkpoint=True` every control step is its own torch.utils.checkpoint block: the forward pass keeps
 only the states between control steps, the backward pass recomputes one control step at a time.  Memory then
@@ -152,6 +153,7 @@ class GradStand(GradEnv):
         left, right = m.body_names.index("left_foot_link"), m.body_names.index("right_foot_link")
         self.left_sole = (sole & (cb == left)).to(dtype)
         self.right_sole = (sole & (cb == right)).to(dtype)
+        self.other_body = torch.nn.functional.one_hot(cb, m.nbody).to(dtype) * (~sole)[:, None].to(dtype)
         self.contact = torch.ones(robots, m.ncontact, dtype=dtype, device=self.device)
         self.push_timer = self._uniform(*push_interval_s, (robots,))
         self.reset()
@@ -208,10 +210,14 @@ class GradStand(GradEnv):
                                      self._noisy(self.gyro, "gyro"), quat, self.actions, gravity=self._noisy(g, "gravity"))
 
     def critic_obs(self) -> torch.Tensor:
-        """rl/stand/env.py's critic input: clean observation | trunk velocity | height error | feet on the ground."""
+        """rl/stand/env.py's critic input: clean observation | trunk velocity | height error | feet on the ground.
+
+        The trunk velocity is computed from the state (M(q)^-1 p, the same number step() stores in v_body), so a
+        derivative of the critic's input reaches q and p: the learned term 2 is differentiated through it."""
         q = self.plant.q
+        v_body = self.plant.velocity()[:, 3:6]
         feet = torch.stack(((self.contact @ self.left_sole) > 0, (self.contact @ self.right_sole) > 0), -1).to(self.dtype)
-        return torch.cat((self.observe(noise=False), self.v_body, q[:, 2:3] - self.stand_height, feet), -1)
+        return torch.cat((self.observe(noise=False), v_body, q[:, 2:3] - self.stand_height, feet), -1)
 
     # ------------------------------------------------------------------ one control step, as a function
     def _advance(self, a, push, lag, q, p, xi, lam, ring, ring_idx, last_target, actions, qd):
@@ -264,9 +270,40 @@ class GradStand(GradEnv):
         self.prev_qd, self.prev_actions = self.qd, self.actions
         self.qd, self.v_body, self.gyro = out[11:14]
         self.actions = a
-        return reward, {"copper_W": copper_w.detach(), "terms": {k: weighted[i].detach() for i, k in enumerate(SMOOTH)}}
+        with torch.no_grad():   # the terms without a derivative, as rl/stand/env.py counts them
+            both = ((self.contact @ self.left_sole) > 0) & ((self.contact @ self.right_sole) > 0)
+            others = ((self.contact @ self.other_body) > 0).sum(-1).to(self.dtype)
+            counted = POLICY_DT * (REWARDS["alive"] + REWARDS["feet_grounded"] * both.to(self.dtype)
+                                   + REWARDS["undesired_contacts"] * others
+                                   + REWARDS["termination"] * self.fallen().to(self.dtype))
+        return reward, {"copper_W": copper_w.detach(), "terms": {k: weighted[i].detach() for i, k in enumerate(SMOOTH)},
+                        "reward_all": reward.detach() + counted}
 
     # ------------------------------------------------------------------ term 2 and falls
+    # what the end state costs, per second if it stayed (and the kinetic energy in J): term 2 is a weighted sum of these
+    STATE_COSTS = ("orientation", "base_height", "similar_to_default", "kinetic_J", "base_lin_vel", "base_ang_vel",
+                   "joint_vel")
+
+    def state_costs(self) -> torch.Tensor:
+        """(B, len(STATE_COSTS)) >= 0, differentiable in q and p: the running cost's terms that read only the state,
+        with their weights (cost per second), and the kinetic energy 1/2 p^T M^-1 p [J]."""
+        pl = self.plant
+        q = pl.q
+        nu = pl.velocity()
+        g = self.contract.projected_gravity(q[:, 3:7])
+        return torch.stack((-REWARDS["orientation"] * g[:, :2].square().sum(-1),
+                            -REWARDS["base_height"] * (q[:, 2] - self.stand_height).square(),
+                            -REWARDS["similar_to_default"] * (q[:, 7:] - self.contract.default_qpos).abs().sum(-1),
+                            0.5 * (pl.p * nu).sum(-1),
+                            -REWARDS["base_lin_vel"] * nu[:, 3:6].square().sum(-1),
+                            -REWARDS["base_ang_vel"] * nu[:, :3].square().sum(-1),
+                            -REWARDS["joint_vel"] * nu[:, 6:].square().sum(-1)), -1)
+
+    @staticmethod
+    def fixed_term2_weights(seconds: float = 1.0, kinetic: float = 1.0) -> tuple:
+        """The weights of STATE_COSTS that give terminal_cost(seconds, kinetic)."""
+        return (seconds, seconds, seconds, kinetic, 0.0, 0.0, 0.0)
+
     def terminal_cost(self, seconds: float = 1.0, kinetic: float = 1.0) -> torch.Tensor:
         """Term 2 of the professor's formula, ||x(T) - x_T||^2 with weights: x_T = the home pose, upright, at rest.
 

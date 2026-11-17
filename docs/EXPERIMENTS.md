@@ -4,7 +4,7 @@ This file is the working plan of the thesis experiments: the rules, what exists,
 package has a goal, the files it touches, what to reuse, and a check that says it is done. Update the status tables
 when a package is finished.
 
-## Start here (state of 17 Nov 2026, morning)
+## Start here (state of 18 Nov 2026)
 
 - **The thesis method** (decided by the user on 16 Nov): the professor's formula as written
   (`MA/ph_formula_rl_mbrl.pdf`): minimise L = running cost (term 1) + cost at the end (term 2) over the
@@ -20,10 +20,14 @@ when a package is finished.
   (`Full Body/rl/walk/task.py`), on the C++ plant (`rl/walk/env.py`) and on the differentiable plant
   (`mbrl/grad/walk_env.py`).  Both pay the same for the same motion, and the derivative is right while the robot
   walks (within 6e-7 over 1 s with 8 foot landings and lift-offs) and does not blow up.  Nothing is trained yet.
-- **Every step can be repeated by name:** `steps/W0.sh`, `steps/W1.sh`, `steps/W2.sh` (`steps/list.sh`,
-  `steps/README.md`); each finished step has a git tag of the same name in both repositories.
-- **Next:** W3 (a learned value in place of the fixed term 2), then W4 (speed) and W5 (train the walk).  Open
-  from W1: two more training seeds for standing (`steps/W1.sh launch 2`, the user's launch, any time).
+- **Term 2 learned (W3, 17 Nov, laptop):** a free value network failed twice (its slope has nothing to do with the
+  physics); term 2 with learned weights works: the costs the end state causes, each weighted by how long it will
+  last, learned from the returns, starting at the fixed term 2.  Same laptop budget as the fixed run (16 robots,
+  40 min, seed 1): 1.3 % falls / 3.1 W against 5.2 % / 2.6 W, and no swing between evaluations.  Numbers: W3.
+- **Every step can be repeated by name:** `steps/W0.sh` ... `steps/W3.sh` (`steps/list.sh`, `steps/README.md`);
+  each finished step has a git tag of the same name in both repositories.
+- **Next:** the Kaggle comparison run of W3 (`steps/W3.sh launch`, the user's launch, 6 h), then W1's seeds 2 and 3
+  with whichever term 2 wins, then W4 (speed) and W5 (train the walk).
 - The planner (`mbrl/mpc`, packages 3-5 below) and PPO on pH are **comparison rows** now, not the thesis method.
 - Commands: tests `scripts/test_all.sh`; Kaggle runs are started by the user (`kaggle/run.sh`, commit and push
   first); Python: `~/Dokumente/Robotics/venv/bin/python`; on the laptop one gradient job at a time (7 GB of memory)
@@ -446,11 +450,112 @@ neither breaks nor blows up the derivative.  Not covered by this: repeated steps
 - `GradWalk.terminal_cost` is a place holder (the end state's tracking and posture terms, charged for 1 s more);
   W3 replaces it.
 
-### W3: a learned value in place of the fixed term 2
-- Walking has no fixed goal state at the end of a window.  `mbrl/grad/train.py` gets a value network fitted on the
-  windows (TD(lambda); `mbrl/mpc/learner.py` has the returns) and uses it at the window's end
-  (`mbrl/grad/refine.py --value` shows where it enters).
-- Done when: standing learned with the learned term 2 is as good as with the fixed one (`GradStand.terminal_cost`).
+### W3: a learned value in place of the fixed term 2  **Laptop: works (17 Nov); Kaggle comparison open.**  Repeat: `steps/W3.sh check | laptop | launch | score`
+- **Why:** term 2 of the professor's formula charges the state at the end of a window against a goal state x_T.
+  Standing has one (upright, home pose, at rest); walking has none.  So term 2 becomes **-V(x(T))**: minus the reward
+  the robot can still expect from x(T) on, learned from what the robots really get.  The learner maximises
+  sum_t gamma^t r_t + gamma^K V(x(T)), with the derivative through the pH model into V as before into the fixed
+  term 2.  (The same split as SHAC, Xu et al. 2022: model gradients inside the window, a learned value beyond it.)
+- **What V learns from** (`--value-reward`): `smooth` (default) = the objective the learner differentiates (the
+  reward terms with a derivative and the fall charge).  `full` = the full reward, including the terms without a
+  derivative (standing: alive, feet_grounded, undesired_contacts, termination; walking: air_time, terminated;
+  `GradStand.step` and `GradWalk.step` report it as `info["reward_all"]`).  `full` was the first plan and failed
+  (attempt 1 below).
+- **How:** `mbrl/grad/value.py`.  TD(lambda) returns of every window (lambda 0.95, gamma 0.99), bootstrapped with a
+  slowly following copy of V (Polyak, tau 0.2); the copy is also what the learner differentiates at the window's
+  end.  V (128-128, as SHAC's critics) is fitted on the last 4 windows (5 epochs, 4 minibatches, Adam 5e-4).
+  Input: the critic's observation (standing 78: the clean observation, trunk velocity, height error, feet down;
+  walking 90: Eric's critic), computed from the state so the derivative reaches q and p.  V learns from the first
+  update on, but the window's end keeps the fixed term 2 for 20 updates (`--value-start`) and then goes over to -V
+  within 10 (`--value-ramp`).  Falls inside the window are charged the fixed term 2 as before, so the only change
+  against W1 is the window's end.  `python -m mbrl.grad.train ... --term2 value`.
+- **Checks** (`tests/test_grad_value.py`): the TD(lambda) targets by hand; V learns a function of its input; the
+  full reward adds exactly the counting terms; the window's derivative through V equals one graph over the window
+  (standing with the full V and during the hand-over, walking with noise, pushes, delays and changing requests);
+  the fixed term 2 is unchanged (a fixed-seed standing window gives bit-identical gradients).
+- **Done when:** standing learned with -V is as good as with the fixed term 2.
+- **Attempt 1 (17 Nov, laptop, failed): V from the full reward, 512-256-128, hand-over from the first update.**
+  The settings of 16 Nov's fixed-term-2 laptop run (16 robots, window 20, seed 1, 40 min, one core;
+  `logs/grad-stand-value-full-laptop`).  In-run evaluations, falls with pushes (64 robots):
+
+  | | 10 min | 20 min | 30 min | 40 min |
+  |---|---|---|---|---|
+  | fixed term 2 (16 Nov) | 26.6 % | 3.1 % | 26.6 % | 4.7 % |
+  | learned V, attempt 1 | 57.8 % | 100 % | 100 % | 100 % |
+
+  It went wrong during the hand-over, before any robot fell: at updates 4-6 (V at 30-50 % weight) the power rose
+  from 2 W to 7 W (fixed run: 2 W), while V's explained variance was still below zero: the learner followed the
+  slope of a V that had not learned anything.  The deeper reason: while the robots stand, nobody falls, so the
+  counting terms (alive, feet, termination) are the same for every state; a V of the full reward is then a
+  constant plus fitting noise, and its slope carries nothing.  The action gradient grew 40-fold (median 0.08
+  against 0.002) and, normalised per update, followed that slope.  Changes for attempt 2: V learns the
+  differentiated objective (whose terms differ from state to state), a smaller V (128-128), and V only used after
+  20 updates of learning.
+- **Attempt 2 (17 Nov, laptop, failed): V from the differentiated objective, 128-128, used after 20 updates**
+  (`logs/grad-stand-value-net-laptop`): 100 % falls at 10, 20, 30 and 40 min.  While V only learned (updates 1-20)
+  the robots stood (0 falls); as soon as V was used the power rose (12 W at half weight, 54 W at 0.8) and they
+  fell.  Two measurements on windows from update 24
+  (`python -m mbrl.grad.term2_diag logs/grad-stand-value-net-laptop/model_24.pt`):
+  - The critic's input contains the last action, so V's raw slope in that input goes straight into the last
+    actions: the gradient of the last control step was 300 times the fixed run's (2.6e-2 against 8e-5).
+  - At the end states, V's slope in the pH state (q, p) is unrelated to the fixed term 2's (cosine about 0,
+    -0.15 to +0.08 over 48 robots) and 10-20 times larger.  The resulting action gradient was anti-aligned with the
+    fixed one (cosine -0.5 to -0.7).
+  A network fitted to returns gets the values right on average, but nothing makes its slope right; with 16 robots
+  near one pose there is far too little variation to learn a slope, and the method lives on exactly that slope.
+- **Attempt 3: term 2 with learned weights** (`--term2 weights`, `value.WeightLearner`):
+  term 2 = sum_k s_k c_k(x(T)), V(x) = b - sum_k s_k c_k(x).  c_k are the costs the end state causes
+  (`env.state_costs()`: the running cost's terms that read only the state, per second; for standing also the
+  kinetic energy), s_k >= 0 "how many seconds each will last", b the level, learned from the same TD(lambda) returns
+  (Adam 1e-2, the weights kept >= 0, the same target copy).  Standing's fixed term 2 is this sum with
+  s = (1, 1, 1, 1 per J, 0, 0, 0), so the learner starts exactly there (tested: the same action gradients to
+  1e-10) and needs no hand-over; walking has no goal state but has these costs (its STATE_TERMS).  The slope is
+  always a positive mix of physical slopes, and 7 numbers (standing) or 14 (walking) are learned instead of 27 000.
+- **Attempt 3 on the laptop (17 Nov): it works.**  The same settings as the fixed run and attempts 1 and 2 (16
+  robots, window 20, seed 1, 40 min, one core; `logs/grad-stand-weights-laptop`; repeat: `steps/W3.sh laptop`).
+  In-run evaluations (64 robots):
+
+  | | 10 min | 20 min | 30 min | 40 min |
+  |---|---|---|---|---|
+  | fixed term 2 (16 Nov), falls with pushes | 26.6 % | 3.1 % | 26.6 % | 4.7 % |
+  | fixed term 2, power with pushes | 3.5 W | 2.5 W | 6.1 W | 2.8 W |
+  | learned weights, falls with pushes | 1.6 % | 0 % | 3.1 % | 1.6 % |
+  | learned weights, power with pushes | 2.8 W | 3.1 W | 3.4 W | 3.4 W |
+
+  Quiet: 0 % falls at every evaluation (fixed run: 3.1 % once, at 30 min).  The swing between evaluations is gone.
+  Scored as W1 (`python -m mbrl.grad.score <run folder>`: the best in-run checkpoint, 3 seeds x 128 robots with
+  pushes and noise, once quiet, 20 s in MuJoCo):
+
+  | term 2 | checkpoint | falls with pushes | power | tilt | quiet | MuJoCo 20 s, quiet / push 0.3 m/s |
+  |---|---|---|---|---|---|---|
+  | fixed (16 Nov) | update 41 | 5.2 % (20 of 384) | 2.6 W | 0.74° | 0 %, 0.8 W | stands, 0.7° / 1.2° |
+  | learned weights | update 48 | 1.3 % (5 of 384) | 3.1 W | 0.64° | 0 %, 0.9 W | stands, 0.5° / 1.3° |
+
+  - **What the returns taught** (weights at update 48, seconds): orientation 3.8, base height 1.8, pose
+    (similar_to_default) 2.1, kinetic energy 1.2 per J, trunk speed 0.8, trunk turning 1.2, joint speed 0.15.  A
+    tilt or a wrong pose at the window's end lasts 2-4 s, not the 1 s the fixed term 2 assumed, and the trunk's
+    speed counts (weight 0 in the fixed term 2).  By update 88 they had settled (3.9, 1.7, 2.5, 1.2, 0.8, 1.3, 0.06).
+  - **The price: 0.5 W more.**  The energy is a cost of the actions, not of the state, so it is not in term 2; when
+    term 2's weights grow, posture weighs more against energy and the robot stands a little stiffer.  Training was
+    less calm than in the fixed run: training power 1.6-5.8 W (fixed 1.8-3.9 W), training falls in 7 of 88 updates
+    (fixed 3 of 74), mean action gradient 0.0034 (fixed 0.0020).
+  - **The diagnosis that found attempt 2's fault, on this run**
+    (`python -m mbrl.grad.term2_diag logs/grad-stand-weights-laptop/model_48.pt`, 2 min):
+
+    | | attempt 2 (network) | attempt 3 (learned weights) |
+    |---|---|---|
+    | direction of the action gradient against the fixed term 2's (cosine) | -0.5 to -0.7 | +0.97 |
+    | slope in (q, p) at the end states against the fixed term 2's (cosine per robot, median) | about 0 | +0.95 to +0.97 (worst robot +0.83) |
+    | size of that slope against the fixed term 2's | 10-20 times | 2 times (the weights grew) |
+    | gradient of the last control step against the fixed term 2's | 300 times | the same |
+
+  - **Not shown yet:** one training seed of 16 robots each, and laptop runs swing (the fixed run between 3 % and
+    27 %).  The test that decides is the Kaggle run with the settings of `grad-stand-v1c` (1024 robots, 6 h, seed 1)
+    and `--term2 weights`: `steps/W3.sh launch`, run name `grad-stand-weights` (the user's launch).
+  - **Then:** if it is at least as good as `grad-stand-v1c` (1.0 % falls / 2.3 W), the learned weights become the
+    method's term 2, and W1's seeds 2 and 3 are run with them (so they wait for this run).  If not, standing keeps
+    the fixed term 2, and walking (which has no goal state) starts from its own learned weights in W5.  Tag `W3`
+    in both repositories after the Kaggle run.
 
 ### W4: speed for walking
 - In the gradient plant only: the 8 sole contact points instead of 128 (most of the 14 MB per robot is contact
