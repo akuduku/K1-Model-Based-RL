@@ -4,20 +4,20 @@ This file is the working plan of the thesis experiments: the rules, what exists,
 package has a goal, the files it touches, what to reuse, and a check that says it is done. Update the status tables
 when a package is finished.
 
-## Start here (state of 16 Nov 2026, night)
+## Start here (state of 17 Nov 2026, morning)
 
 - **The thesis method** (decided by the user on 16 Nov): the professor's formula as written
   (`MA/ph_formula_rl_mbrl.pdf`): minimise L = running cost (term 1) + cost at the end (term 2) over the
   controller's weights, with the derivative taken **through the pH model**.  Code: `mbrl/grad/`.  Details, numbers
   and traps: section "Gradients through the pH model".
-- **It works on standing:** from a random network, 16 robots, 41 min on one laptop core, 23 680 environment steps:
-  2.3 % falls / 2.8 W with pushes and noise, 0 % / 0.9 W quiet; stands in MuJoCo.  One seed, unsteady between
-  updates.  PPO on pH: 0 % / 2.1 W after 295 M steps.
-- **Running:** Kaggle `grad-stand-v1c` (T4, 6 h, started 16 Nov about 23:50, robots chosen by the run itself; two
-  earlier launches ran out of GPU memory, see "Memory" below).  Fetch:
-  `KERNEL_SLUG=mbrl-k1-grad-stand TASK=grad-stand kaggle/fetch.sh grad-stand-v1c`.
-- **Next:** the roadmap W1-W6 at the end of this file (stand solid, the walk task, a learned term 2, speed, walk and
-  run, kick).
+- **It works on standing:** Kaggle `grad-stand-v1c` (T4, 1024 robots, 6 h, from a random network, seed 1): the
+  best in-run checkpoint (update 80, 1.6 M environment steps, 2.9 h) scores 1.0 % falls / 2.3 W with pushes and
+  noise (3 scoring seeds x 128 robots), 0 % / 1.1 W quiet, and stands 20 s in MuJoCo.  PPO on pH: 0 % / 2.1 W
+  after 295 M steps.  So: close to PPO's quality on standing with about 180 times fewer environment steps.  Open: one
+  training seed so far, and PPO's row is the end of its 7 h run (when PPO first reached this quality has not been
+  looked up, so no claim about wall time yet).  Numbers: table "Reference rows for stage 1" and W1.
+- **Next:** W1's rest (two more training seeds, two 6 h Kaggle runs, started by the user) and, on the laptop in
+  the meantime, W2 (the walk task).  Then W3-W6 of the roadmap at the end of this file.
 - The planner (`mbrl/mpc`, packages 3-5 below) and PPO on pH are **comparison rows** now, not the thesis method.
 - Commands: tests `scripts/test_all.sh`; Kaggle runs are started by the user (`kaggle/run.sh`, commit and push
   first); Python: `~/Dokumente/Robotics/venv/bin/python`; on the laptop one gradient job at a time (7 GB of memory)
@@ -68,7 +68,7 @@ walk policy and can start from his kick motion) is a **reference**, not the mode
 
 | Stage | Skill | Agent contract | PPO arm | Model-based arm |
 |---|---|---|---|---|
-| 1 | stand under pushes | firmware `stand`, 72 -> 22 (`rl/stand`) | done: `stand-ph-v1` (3000 iterations, ~295 M steps, 7 h on a T4, no falls) | planner: `mb-stand-v1` + fix (6.8 W, 5.5 % falls); **thesis method: first result on the laptop, `grad-stand-v1` running (W1)** |
+| 1 | stand under pushes | firmware `stand`, 72 -> 22 (`rl/stand`) | done: `stand-ph-v1` (3000 iterations, ~295 M steps, 7 h on a T4, no falls) | planner: `mb-stand-v1` + fix (6.8 W, 5.5 % falls); **thesis method: `grad-stand-v1c` (1.6 M steps, 2.9 h on a T4: 1.0 % falls, 2.3 W); seeds 2 and 3 open (W1)** |
 | 2 | walk on velocity commands, standing included; run = higher commands | sprint family, 75 -> 22 | open (W2, W5) | open (W2-W5) |
 | 3 | kick from standing | kick_walk, 165 (166 with the request clock) -> 22 | open (W6) | open (W6) |
 | 4 | walk, stay and kick | kick_walk | open (W6) | open (W6) |
@@ -131,20 +131,24 @@ Reference rows for stage 1 (`python rl/stand/evaluate.py --policy <file> -B 128`
 | PPO `stand-ph-v1` (`deploy_2999.bin`, 295 M executed steps) | 0 % | 10.0 s | 2.1 W | 0.33° |
 | model-based, laptop (`policies/mb-stand-laptop3_346.bin`, 0.53 M executed + 21 M model steps, 85 min on 6 CPU cores) | 11.7 % | 9.65 s | 14.4 W | 2.5° |
 
+| **professor's formula, Kaggle `grad-stand-v1c`, best in-run checkpoint** (`policies/grad-stand-v1c_80.bin`: 1024 robots, 1.64 M environment steps, 2.9 h on a T4; training seed 1; scored with seeds 7, 8, 9 = 384 episodes) | **1.0 %** | 9.97 s | **2.3 W** | 0.46° |
+| the same run at its end (`policies/grad-stand-v1c_155.bin`, 3.17 M steps, 5.6 h; same 384 episodes) | 0.5 % | 10.0 s | 2.4 W | 0.54° |
 | **professor's formula, from scratch on the laptop** (`policies/grad-stand-laptop_74.bin`: gradients through the pH model, 16 robots, 23 680 environment steps, 41 min on one CPU core; one seed) | **2.3 %** | 9.94 s | **2.8 W** | 0.68° |
 | the same run at update 41 (`policies/grad-stand-laptop_41.bin`, 13 120 steps, 20 min) | 6.2 % | 9.86 s | 2.5 W | 0.73° |
 | planner with the fix of 16 Nov (`policies/mb-stand-s05_392.bin`, from `mb-stand-v1`'s best + 50 min laptop) | 5.5 % | 9.87 s | 6.8 W | 0.99° |
 | model-based, Kaggle `mb-stand-v1`, best checkpoint (`policies/mb-stand-v1_260.bin`, 1.6 M executed + 64 M model steps, 2.2 h on a T4) | 2.3 % | 9.94 s | 14.0 W | 1.3° |
 | model-based, Kaggle `mb-stand-v1`, end of the run (`policies/mb-stand-v1_708.bin`, 4.35 M executed + 174 M model steps, 6 h) | 10.2 % | 9.73 s | 24.6 W | 2.1° |
 
-Without pushes and noise (`--quiet`): PPO 0 % falls, 1.0 W; professor's formula 0 % falls, 0.9 W (update 74) and
-0.8 W (update 41); planner with the fix 0 %, 5.3 W; model-based 0 % falls at 13.3 W (best) and 20.9 W (end).
+Without pushes and noise (`--quiet`): PPO 0 % falls, 1.0 W; professor's formula on Kaggle 0 % falls, 1.1 W, tilt
+0.15° (update 80) and 1.2 W, 0.59° (end); on the laptop 0 % falls, 0.9 W (update 74) and 0.8 W (update 41); planner with the fix 0 %, 5.3 W; model-based 0 % falls at 13.3 W (best) and 20.9 W (end).
 In MuJoCo (`rl/stand/eval_mujoco.py --seconds 20`, quiet and `--push 0.3`): all three stand the 20 s; largest tilt
-PPO 0.4° / 0.7°, model-based best 3.9° / 3.9°, model-based end 1.5° / 2.1°.
+PPO 0.4° / 0.7°, professor's formula (`grad-stand-v1c`) 0.7° / 1.6° (update 80) and 0.9° / 1.4° (end),
+model-based best 3.9° / 3.9°, model-based end 1.5° / 2.1°.
 
 **Stage 1 as it stands (16 Nov): the model-based arm learns to stand from scratch with about 1 M executed steps
 (PPO: about 14 M), but its policy is not as good as PPO's: 7 times the power, and it still falls under pushes.
-It is not a result for the thesis table yet.**
+It is not a result for the thesis table yet.**  (This paragraph is about the planner, `mbrl/mpc`.  The thesis
+method's standing result of 17 Nov is in the two `grad-stand-v1c` rows above and under W1.)
 
 ## Work packages
 
@@ -363,11 +367,23 @@ push and its result in this file.
 2.8e-8 (20 steps); gradient norm 9.3 and 14.2, the same size as in a quiet stand (6.8 and 17).  So one landing
 neither breaks nor blows up the derivative.  Not covered by this: repeated steps, sliding feet, the ball.
 
-### W1: standing, solid
-- Fetch and score `grad-stand-v1c` (command in "Start here"): the best in-run checkpoint with
-  `Full Body/rl/stand/evaluate.py --policy <deploy.bin> -B 128` (with and without `--quiet`) and
-  `rl/stand/eval_mujoco.py --seconds 20` (quiet and `--push 0.3`).  Add the row to the table above.
-- Two more seeds: the same Kaggle command with `TRAIN_ARGS="--seed 2"` and `"--seed 3"`, other run names.
+### W1: standing, solid  (seed 1 done 17 Nov; seeds 2 and 3 open)
+- **`grad-stand-v1c`, fetched 17 Nov** (`outputs/kaggle/grad-stand-v1c/`).  The run sized itself to 1024 robots
+  (8.1 MiB per robot measured), 156 updates of 20 480 environment steps in 5.6 h: 129 s per update (43 s forward,
+  87 s backward), about 160 robot-steps per second.  No out-of-memory fallback.
+- In-run evaluations (128 robots, every 10 updates), falls with pushes: 5.5, 2.3, 0.8, 0.8, 3.1, 2.3, 0, 0, 1.6, 0,
+  3.1, 0.8, 0, 0, 0 %; power 2.1 to 2.6 W throughout; quiet: 0 % falls at every evaluation.  The swing is 0 to 4
+  robots of 128 (the laptop run with 16 robots swung between 3 % and 27 %).
+- The checkpoint that counts (rule 6: best in-run evaluation; 0 % falls and the lowest power among those) is update
+  80.  Scored again with other seeds: `Full Body/rl/stand/evaluate.py --policy <deploy.bin> -B 128 --seed 7|8|9`
+  gives 1.6, 0, 1.6 % falls (4 of 384 episodes), 2.2 to 2.3 W; the end of the run (update 155) 0, 0.8, 0.8 % (2 of
+  384), 2.4 to 2.5 W.  The difference between the two is inside the noise of 384 episodes.  PPO's row was scored
+  with one seed of 128 robots; score it with the same three seeds before the thesis table is final.
+- To watch: in the quiet evaluation the tilt grows over the run (0.08° at update 40, 0.62° at update 150) and the
+  power from 0.9 to 1.2 W: the late policy stands with a small lean.  It does not cost falls; if it shows in the
+  other seeds too, look at term 2's pose weight and at the shrinking step (`--delta-final`).
+- Two more seeds: the same Kaggle command with `TRAIN_ARGS="--seed 2"` and `"--seed 3"`, other run names
+  (`grad-stand-s2`, `grad-stand-s3`).
 - Done when: three seeds in the table.  Target: falls with pushes near 0 %, power near 2 W, no swing back between
   evaluations (the laptop run swung between 3 % and 27 %).
 
