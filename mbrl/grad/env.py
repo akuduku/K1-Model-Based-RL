@@ -1,4 +1,5 @@
-r"""The stand task on the differentiable pH plant: what the professor's formula is minimised on.
+r"""The stand task on the differentiable pH plant, and what every task on it shares (GradEnv): what the professor's
+formula is minimised on.
 
     L = sum over the window of (running cost, term 1) + (cost at the end of the window, term 2),
     x following the model  x' = (J - R) grad H + G u,  u from the controller (network + PD driver).
@@ -36,26 +37,112 @@ MIN_HEIGHT = 0.28
 NA = C.NUM_ACTIONS
 
 
-class GradStand:
+class GradEnv:
+    """What every task on the differentiable plant shares: the plant and the firmware chain, the random draws, the
+    transport delays, and a control step's state by name (kept and put back by the learner's backward pass).
+
+    A task (GradStand here, GradWalk in walk_env.py) adds: reset, observe, step, terminal_cost, fallen, and
+        FLOAT_STATE   names of the state a derivative flows through
+        ENV_KEYS      this env's own attributes that belong to the state
+    A task with a memory keeps it in `self.mem` (a dict of tensors); its entries are state under "mem:<name>".
+    """
+
+    PLANT_KEYS = ("q", "p", "xi", "lam")
+    FW_KEYS = ("ring", "last_target", "ring_idx", "lag")
+    ENV_KEYS: tuple = ()
+    FLOAT_STATE: tuple = ()
+    mem: dict | None = None
+
+    def _build(self, robots: int, seed: int, device, dtype, gains: str, slew: bool, delay_ms) -> None:
+        """Generator, model, plant and the firmware's settings (the firmware itself after the task's first reset)."""
+        self.B = robots
+        self.device, self.dtype = torch.device(device), dtype
+        self.gen = torch.Generator().manual_seed(seed)          # on the CPU: the same draws on every device
+        ph_solve.probe(self.device, robots, dtype=dtype)       # a GPU without batched solves: solve on the CPU
+        self.model = load_k1(dtype=dtype, device=self.device)
+        self.plant = K1PHPlant(model=self.model, batch=robots, timestep=POLICY_DT / SUBSTEPS)
+        # the lag is drawn here (redraw_lags), not inside policy_step: a recomputed control step must repeat exactly
+        self.fw_cfg = fwm.FirmwareConfig(gains=gains, slew=slew, delay_ms=tuple(delay_ms), policy_dt=POLICY_DT,
+                                         delay_hold_prob=None)
+
+    # ------------------------------------------------------------------ helpers
+    def _rand(self, shape) -> torch.Tensor:
+        return torch.rand(shape, generator=self.gen, dtype=torch.float64).to(self.device, self.dtype)
+
+    def _uniform(self, lo, hi, shape) -> torch.Tensor:
+        return lo + (hi - lo) * self._rand(shape)
+
+    def _z(self, n: int) -> torch.Tensor:
+        return torch.zeros(self.B, n, dtype=self.dtype, device=self.device)
+
+    # ------------------------------------------------------------------ state
+    def detach(self) -> None:
+        """Cut the graph: the next window starts from these numbers."""
+        pl, fw = self.plant, self.fw
+        for k in ("q", "p", "xi", "lam", "ball"):
+            setattr(pl, k, getattr(pl, k).detach())
+        pl.ledger = Ledger.zeros(self.B, pl.dtype, pl.device)
+        fw.ring, fw.last_target = fw.ring.detach().clone(), fw.last_target.detach()
+        for k in self.ENV_KEYS:
+            setattr(self, k, getattr(self, k).detach())
+        if self.mem is not None:
+            self.mem = {k: v.detach() for k, v in self.mem.items()}
+
+    def get_state(self) -> dict:
+        """Everything a control step reads, by name."""
+        pl, fw = self.plant, self.fw
+        state = {k: getattr(pl, k) for k in self.PLANT_KEYS}
+        state.update({k: getattr(fw, k) for k in self.FW_KEYS})
+        state.update({k: getattr(self, k) for k in self.ENV_KEYS})
+        if self.mem is not None:
+            state.update({f"mem:{k}": v for k, v in self.mem.items()})
+        return state
+
+    def set_state(self, state: dict) -> None:
+        pl, fw = self.plant, self.fw
+        for k in self.PLANT_KEYS:
+            setattr(pl, k, state[k])
+        for k in self.FW_KEYS:
+            setattr(fw, k, state[k])
+        for k in self.ENV_KEYS:
+            setattr(self, k, state[k])
+        if self.mem is not None:
+            self.mem = {k: state[f"mem:{k}"] for k in self.mem}
+
+    def redraw_lags(self, hold_prob: float = 0.3) -> None:
+        """Between control steps: some robots get a new transport delay (as rl/stand's delay_hold_prob)."""
+        lo, hi = self.fw_cfg.delay_ms
+        if hi <= lo:
+            return
+        redraw = self._rand((self.B,)) >= hold_prob
+        if bool(redraw.any()):
+            lag = self.fw.lag.clone()       # a new tensor: the old one belongs to control steps already taken
+            lag[redraw] = fwm.draw_lags(self.fw_cfg, int(redraw.sum()), self.plant.h, self.device).long()
+            self.fw.lag = lag
+
+    def between_steps(self) -> None:
+        """Everything random that happens between two control steps, outside the derivative (the learner calls it
+        before every step and keeps the state after it)."""
+        self.redraw_lags()
+
+
+class GradStand(GradEnv):
     """rl/stand's task on the differentiable Python plant.
 
     Quiet by default (no sensor noise, no pushes, 20 ms delay).  `obs_noise` (rl/stand/env.py's dict), `push_dv`
     with `push_interval_s`, and `delay_ms` as a range switch the randomisation of the other rows on.
     """
 
+    # everything a control step reads, by name; FLOAT_STATE are the parts a derivative flows through
+    FLOAT_STATE = ("q", "p", "xi", "lam", "ring", "last_target", "actions", "qd", "gyro")
+    ENV_KEYS = ("actions", "qd", "gyro", "contact", "prev_actions", "prev_qd", "v_body")
+
     def __init__(self, robots: int, seed: int = 1, joint_noise: float = 0.02, device="cpu", dtype=torch.float64,
                  checkpoint: bool = False, obs_noise: dict | None = None, push_dv: float = 0.0,
                  push_interval_s=(4.0, 8.0), delay_ms=(20.0, 20.0)):
-        self.B, self.joint_noise, self.use_checkpoint = robots, joint_noise, checkpoint
-        self.device, self.dtype = torch.device(device), dtype
+        self.joint_noise, self.use_checkpoint = joint_noise, checkpoint
         self.obs_noise, self.push_dv, self.push_interval_s = obs_noise or {}, push_dv, push_interval_s
-        self.gen = torch.Generator().manual_seed(seed)          # on the CPU: the same draws on every device
-        ph_solve.probe(self.device, robots, dtype=dtype)       # a GPU without batched solves: solve on the CPU
-        self.model = load_k1(dtype=dtype, device=self.device)
-        self.plant = K1PHPlant(model=self.model, batch=robots, timestep=POLICY_DT / SUBSTEPS)
-        # the lag is drawn here (redraw_lags), not inside policy_step: a recomputed control step must repeat exactly
-        self.fw_cfg = fwm.FirmwareConfig(gains=C.GAINS, slew=C.SLEW, delay_ms=tuple(delay_ms), policy_dt=POLICY_DT,
-                                         delay_hold_prob=None)
+        self._build(robots, seed, device, dtype, C.GAINS, C.SLEW, delay_ms)
         self.contract = C.Contract(dtype, self.device)
         self.plant.reset(pose=self.contract.default_qpos)
         self.stand_height = float(self.plant.q[:, 2].mean())
@@ -68,16 +155,6 @@ class GradStand:
         self.contact = torch.ones(robots, m.ncontact, dtype=dtype, device=self.device)
         self.push_timer = self._uniform(*push_interval_s, (robots,))
         self.reset()
-
-    # ------------------------------------------------------------------ helpers
-    def _rand(self, shape) -> torch.Tensor:
-        return torch.rand(shape, generator=self.gen, dtype=torch.float64).to(self.device, self.dtype)
-
-    def _uniform(self, lo, hi, shape) -> torch.Tensor:
-        return lo + (hi - lo) * self._rand(shape)
-
-    def _z(self, n: int) -> torch.Tensor:
-        return torch.zeros(self.B, n, dtype=self.dtype, device=self.device)
 
     # ------------------------------------------------------------------ state
     def reset(self, ids: torch.Tensor | None = None) -> None:
@@ -100,44 +177,6 @@ class GradStand:
             t = getattr(self, k).clone()
             t[ids] = 0.0
             setattr(self, k, t)
-
-    def detach(self) -> None:
-        """Cut the graph: the next window starts from these numbers."""
-        pl, fw = self.plant, self.fw
-        for k in ("q", "p", "xi", "lam", "ball"):
-            setattr(pl, k, getattr(pl, k).detach())
-        pl.ledger = Ledger.zeros(self.B, pl.dtype, pl.device)
-        fw.ring, fw.last_target = fw.ring.detach().clone(), fw.last_target.detach()
-        for k in ("actions", "prev_actions", "qd", "prev_qd", "gyro", "v_body"):
-            setattr(self, k, getattr(self, k).detach())
-
-    # everything a control step reads, by name; FLOAT_STATE are the parts a derivative flows through
-    FLOAT_STATE = ("q", "p", "xi", "lam", "ring", "last_target", "actions", "qd", "gyro")
-    OTHER_STATE = ("ring_idx", "lag", "contact", "prev_actions", "prev_qd", "v_body")
-
-    def get_state(self) -> dict:
-        pl, fw = self.plant, self.fw
-        return {"q": pl.q, "p": pl.p, "xi": pl.xi, "lam": pl.lam, "ring": fw.ring, "last_target": fw.last_target,
-                "ring_idx": fw.ring_idx, "lag": fw.lag, "actions": self.actions, "qd": self.qd, "gyro": self.gyro,
-                "contact": self.contact, "prev_actions": self.prev_actions, "prev_qd": self.prev_qd, "v_body": self.v_body}
-
-    def set_state(self, state: dict) -> None:
-        pl, fw = self.plant, self.fw
-        pl.q, pl.p, pl.xi, pl.lam = state["q"], state["p"], state["xi"], state["lam"]
-        fw.ring, fw.last_target, fw.ring_idx, fw.lag = state["ring"], state["last_target"], state["ring_idx"], state["lag"]
-        for k in ("actions", "qd", "gyro", "contact", "prev_actions", "prev_qd", "v_body"):
-            setattr(self, k, state[k])
-
-    def redraw_lags(self, hold_prob: float = 0.3) -> None:
-        """Between control steps: some robots get a new transport delay (as rl/stand's delay_hold_prob)."""
-        lo, hi = self.fw_cfg.delay_ms
-        if hi <= lo:
-            return
-        redraw = self._rand((self.B,)) >= hold_prob
-        if bool(redraw.any()):
-            lag = self.fw.lag.clone()       # a new tensor: the old one belongs to control steps already taken
-            lag[redraw] = fwm.draw_lags(self.fw_cfg, int(redraw.sum()), self.plant.h, self.device).long()
-            self.fw.lag = lag
 
     def draw_pushes(self) -> torch.Tensor | None:
         """rl/stand's pushes: now and then a horizontal change of the trunk velocity.  -> (B,3) or None."""

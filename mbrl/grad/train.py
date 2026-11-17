@@ -57,7 +57,7 @@ def window(env: GradStand, policy: MLP, args, alive_age: torch.Tensor | None = N
     reward_sum, watts, objective, disc = 0.0, [], 0.0, 1.0
     with torch.no_grad():
         for _ in range(K):
-            env.redraw_lags()
+            env.between_steps()
             states.append(env.get_state())
             clean = env.observe(noise=False)
             o = env.observe()
@@ -142,7 +142,7 @@ def window_one_graph(env: GradStand, policy: MLP, args) -> torch.Tensor:
         return g
 
     for _ in range(args.steps):
-        env.redraw_lags()
+        env.between_steps()
         a = policy(env.observe())
         a.register_hook(clip_and_keep)
         a = a + args.action_noise * torch.randn(a.shape, device=a.device, dtype=a.dtype)

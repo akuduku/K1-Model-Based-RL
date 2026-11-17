@@ -7,8 +7,14 @@ takes d cost / d targets with autograd and compares it with central finite diffe
     python -m mbrl.grad.check --steps 1 5 20
     python -m mbrl.grad.check --steps 5 --push 0.3        # a push at the start: the contact mode changes
     python -m mbrl.grad.check --steps 5 20 --drop 0.02    # the feet land inside the window
+    python -m mbrl.grad.check --task walk --steps 5 20 50 # while the robot walks: repeated steps, sliding feet
 
 cost = copper energy [J] + tilt_weight x sum of (tilt^2) x dt    (smooth terms of the stand reward)
+
+--task walk: the walk task on the differentiable plant (mbrl/grad/walk_env.py).  A released walk (walk_v9) walks
+for --warmup seconds; from there its next K actions are replayed open loop and the cost is minus the sum of the
+walk rewards that have a derivative.  d cost / d actions by autograd against central finite differences.  The
+walk policy only makes the robot step: it is not part of any training.
 """
 
 from __future__ import annotations
@@ -60,8 +66,74 @@ def settle(plant, home, kp, kd, seconds: float = 0.5):
     return get_state(plant)
 
 
+def walk_check(args) -> None:
+    from mbrl.grad.walk_env import GradWalk
+    from rl.walk.backends import resolve_policy
+
+    env = GradWalk(1, seed=args.seed, command=tuple(args.command))
+    net = torch.jit.load(str(resolve_policy(args.policy)), map_location="cpu").eval()
+    act = lambda: net(env.observe(noise=False).float()).to(torch.float64)  # noqa: E731
+    with torch.no_grad():
+        for _ in range(round(args.warmup / POLICY_DT)):
+            env.step(act())
+        start = {k: v.clone() for k, v in env.get_state().items()}
+        recorded, contacts, speed = [], [], []
+        for _ in range(max(args.steps)):          # the walk's own next actions and what the feet do meanwhile
+            a = act()
+            recorded.append(a)
+            env.step(a)
+            contacts.append(env.sig.contact[0].tolist())
+            speed.append(float(env.sig.base_lin_vel[0, 0]))
+    print(f"{args.policy} walks at {sum(speed) / len(speed):.2f} m/s on command {tuple(args.command)} after {args.warmup:g} s; "
+          f"trunk z {float(start['q'][0, 2]):.3f} m")
+
+    def rollout(actions):
+        """actions (K,1,22), open loop from the start state.  -> cost = minus the sum of the differentiable rewards."""
+        env.set_state({k: v.clone() for k, v in start.items()})
+        total = 0.0
+        for a in actions:
+            reward, _ = env.step(a)
+            total = total + reward
+        return -total.sum()
+
+    for K in args.steps:
+        changes = sum(a != b for i in range(1, K) for a, b in zip(contacts[i - 1], contacts[i]))
+        actions = torch.stack(recorded[:K]).clone().requires_grad_(True)
+        t0 = time.time()
+        cost = rollout(actions)
+        t_fwd = time.time() - t0
+        t0 = time.time()
+        (grad,) = torch.autograd.grad(cost, actions)
+        t_bwd = time.time() - t0
+        per_step = grad.flatten(1).norm(dim=1)
+        print(f"\nK = {K:3d} control steps ({K * SUBSTEPS} plant steps), {changes} foot landings and lift-offs inside: "
+              f"cost {float(cost.detach()):.5f}, forward {t_fwd:.1f} s, backward {t_bwd:.1f} s")
+        print(f"  gradient: finite {bool(torch.isfinite(grad).all())}, norm {float(grad.norm()):.4g}, largest "
+              f"{float(grad.abs().max()):.4g}; norm by control step: first {float(per_step[0]):.3g}, largest "
+              f"{float(per_step.max()):.3g} (step {int(per_step.argmax())}), last {float(per_step[-1]):.3g}")
+        flat = grad.flatten()
+        half = args.entries // 2
+        idx = torch.cat((flat.abs().topk(half).indices, torch.randint(0, flat.numel(), (args.entries - half,))))
+        worst = 0.0
+        with torch.no_grad():
+            for j in idx.tolist():
+                d = torch.zeros_like(flat)
+                d[j] = args.eps
+                d = d.reshape(actions.shape)
+                fd = float((rollout(actions.detach() + d) - rollout(actions.detach() - d)) / (2 * args.eps))
+                ag = float(flat[j])
+                rel = abs(fd - ag) / max(abs(fd), abs(ag), 1e-12)
+                worst = max(worst, rel)
+                print(f"    step {j // NJ:2d} joint {j % NJ:2d}: autograd {ag:+.6e}  finite diff {fd:+.6e}  rel. error {rel:.2e}")
+        print(f"  worst relative error {worst:.2e}")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--task", choices=("stand", "walk"), default="stand")
+    ap.add_argument("--policy", default="walk_v9", help="--task walk: the walk that makes the robot step")
+    ap.add_argument("--command", type=float, nargs=3, default=(0.5, 0.0, 0.0), metavar=("VX", "VY", "WZ"))
+    ap.add_argument("--warmup", type=float, default=2.0, help="--task walk: seconds of walking before the window")
     ap.add_argument("--steps", type=int, nargs="+", default=[1, 5, 20], help="control steps K to test")
     ap.add_argument("--push", type=float, default=0.0, help="sideways trunk speed added before the rollout [m/s]")
     ap.add_argument("--drop", type=float, default=0.0,
@@ -71,6 +143,8 @@ def main():
     ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args()
     torch.manual_seed(args.seed)
+    if args.task == "walk":
+        return walk_check(args)
 
     model = load_k1(dtype=torch.float64, device="cpu")
     plant = K1PHPlant(model=model, batch=1)

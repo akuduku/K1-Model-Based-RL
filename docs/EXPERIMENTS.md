@@ -16,8 +16,14 @@ when a package is finished.
   after 295 M steps.  So: close to PPO's quality on standing with about 180 times fewer environment steps.  Open: one
   training seed so far, and PPO's row is the end of its 7 h run (when PPO first reached this quality has not been
   looked up, so no claim about wall time yet).  Numbers: table "Reference rows for stage 1" and W1.
-- **Next:** W1's rest (two more training seeds, two 6 h Kaggle runs, started by the user) and, on the laptop in
-  the meantime, W2 (the walk task).  Then W3-W6 of the roadmap at the end of this file.
+- **The walk task exists on both plants (W2, 17 Nov):** Eric's rewards and commands written once
+  (`Full Body/rl/walk/task.py`), on the C++ plant (`rl/walk/env.py`) and on the differentiable plant
+  (`mbrl/grad/walk_env.py`).  Both pay the same for the same motion, and the derivative is right while the robot
+  walks (within 6e-7 over 1 s with 8 foot landings and lift-offs) and does not blow up.  Nothing is trained yet.
+- **Every step can be repeated by name:** `steps/W0.sh`, `steps/W1.sh`, `steps/W2.sh` (`steps/list.sh`,
+  `steps/README.md`); each finished step has a git tag of the same name in both repositories.
+- **Next:** W3 (a learned value in place of the fixed term 2), then W4 (speed) and W5 (train the walk).  Open
+  from W1: two more training seeds for standing (`steps/W1.sh launch 2`, the user's launch, any time).
 - The planner (`mbrl/mpc`, packages 3-5 below) and PPO on pH are **comparison rows** now, not the thesis method.
 - Commands: tests `scripts/test_all.sh`; Kaggle runs are started by the user (`kaggle/run.sh`, commit and push
   first); Python: `~/Dokumente/Robotics/venv/bin/python`; on the laptop one gradient job at a time (7 GB of memory)
@@ -69,7 +75,7 @@ walk policy and can start from his kick motion) is a **reference**, not the mode
 | Stage | Skill | Agent contract | PPO arm | Model-based arm |
 |---|---|---|---|---|
 | 1 | stand under pushes | firmware `stand`, 72 -> 22 (`rl/stand`) | done: `stand-ph-v1` (3000 iterations, ~295 M steps, 7 h on a T4, no falls) | planner: `mb-stand-v1` + fix (6.8 W, 5.5 % falls); **thesis method: `grad-stand-v1c` (1.6 M steps, 2.9 h on a T4: 1.0 % falls, 2.3 W); seeds 2 and 3 open (W1)** |
-| 2 | walk on velocity commands, standing included; run = higher commands | sprint family, 75 -> 22 | open (W2, W5) | open (W2-W5) |
+| 2 | walk on velocity commands, standing included; run = higher commands | sprint family, 75 -> 22 | task done (W2); training open (W5) | task done and checked (W2); training open (W3-W5) |
 | 3 | kick from standing | kick_walk, 165 (166 with the request clock) -> 22 | open (W6) | open (W6) |
 | 4 | walk, stay and kick | kick_walk | open (W6) | open (W6) |
 
@@ -131,7 +137,7 @@ Reference rows for stage 1 (`python rl/stand/evaluate.py --policy <file> -B 128`
 | PPO `stand-ph-v1` (`deploy_2999.bin`, 295 M executed steps) | 0 % | 10.0 s | 2.1 W | 0.33° |
 | model-based, laptop (`policies/mb-stand-laptop3_346.bin`, 0.53 M executed + 21 M model steps, 85 min on 6 CPU cores) | 11.7 % | 9.65 s | 14.4 W | 2.5° |
 
-| **professor's formula, Kaggle `grad-stand-v1c`, best in-run checkpoint** (`policies/grad-stand-v1c_80.bin`: 1024 robots, 1.64 M environment steps, 2.9 h on a T4; training seed 1; scored with seeds 7, 8, 9 = 384 episodes) | **1.0 %** | 9.97 s | **2.3 W** | 0.46° |
+| **professor's formula, Kaggle `grad-stand-v1c`, best in-run checkpoint** (`policies/grad-stand-v1c_80.bin`: 1024 robots, 1.64 M environment steps, 2.9 h on a T4; training seed 1; scored with seeds 7, 8, 9 = 384 episodes) | **1.0 %** | 9.98 s | **2.3 W** | 0.46° |
 | the same run at its end (`policies/grad-stand-v1c_155.bin`, 3.17 M steps, 5.6 h; same 384 episodes) | 0.5 % | 10.0 s | 2.4 W | 0.54° |
 | **professor's formula, from scratch on the laptop** (`policies/grad-stand-laptop_74.bin`: gradients through the pH model, 16 robots, 23 680 environment steps, 41 min on one CPU core; one seed) | **2.3 %** | 9.94 s | **2.8 W** | 0.68° |
 | the same run at update 41 (`policies/grad-stand-laptop_41.bin`, 13 120 steps, 20 min) | 6.2 % | 9.86 s | 2.5 W | 0.73° |
@@ -387,17 +393,58 @@ neither breaks nor blows up the derivative.  Not covered by this: repeated steps
 - Done when: three seeds in the table.  Target: falls with pushes near 0 %, power near 2 W, no swing back between
   evaluations (the laptop run swung between 3 % and 27 %).
 
-### W2: the walk task, once, for both plants
-- `Full Body/rl/walk/env.py` on the C++ plant (for scoring and for the comparison rows) and
-  `Model Based RL/mbrl/grad/walk_env.py` on the Python plant (differentiable), built like `rl/stand/env.py` and
-  `mbrl/grad/env.py: GradStand` (functional `_advance` for the checkpoint blocks; everything a control step reads
-  must come in through its arguments).  Contract: `Full Body/rl/walk/contract.py` (75 inputs -> 22 targets).
-- Rewards: Eric's walk task (`RL_Core/rl_core/envs/k1_skill.py`, `k1_skill_cfg.py`, `k1_sprint/env.py`).  Terms with
-  a derivative (speed tracking, upright, height, smoothness, power) work as they are.  Terms that count contacts
-  (air time, clearance) have none: give them a smooth form or leave them to the learned value.
-- Tests: both envs give the same reward on the same motion; Eric's walk policy (`policies/walk_teacher.pt`) follows
-  a commanded speed in the C++ env (a check of the environment only, never a part of the method).
-- `rl/walk/evaluate.py` (speed error, falls, watts) and a MuJoCo check.
+### W2: the walk task, once, for both plants  **Done 17 Nov.**  Repeat: `steps/W2.sh`
+- **Where the task is written:** `Full Body/rl/walk/task.py`, and nowhere else.  Eric's walk task (the "base"
+  variant `walk_v9` was trained on): 32 of his 33 reward terms with his weights and formulas, his command drawing
+  and the 2 m/s^2 reference ramp, plus the pH plant's electrical power (`energy`, -0.002 per watt).  Left out:
+  `self_collisions` (the pH plant has no contact between the robot's own bodies).  From his work: rewards and
+  commands only.  Contract: the firmware's sprint agent, 75 inputs -> 22 targets (`rl/walk/contract.py`).
+- **C++ plant:** `Full Body/rl/walk/env.py` (`WalkEnv`, an rsl-rl environment: start pose, gain errors 0.6-1.3,
+  encoder bias, delays 10-70 ms, sensor noise, pushes; an episode ends at the firmware's tilt abort, a body other
+  than a foot on the ground, or the trunk below 0.25 m).  Scoring: `rl/walk/evaluate.py` (per command: falls, speed
+  error, power, joule per metre; `WalkEval` for training loops), `rl/walk/eval_mujoco.py` (the same file in MuJoCo).
+- **Differentiable plant:** `mbrl/grad/walk_env.py` (`GradWalk`).  `mbrl/grad/env.py` now has a base class
+  `GradEnv` (plant, firmware chain, delays, the state of a control step by name); `GradStand` is unchanged: a
+  fixed-seed window gives bit-identical gradients before and after.  The learner's `window` runs on `GradWalk`
+  as it is (`env.between_steps()` redraws delays and advances the commands, outside the derivative).
+- **Which terms a gradient learner gets:** all but the two that only count events (`air_time`, `terminated`;
+  `rl/walk/task.py: COUNTS`).  `GradWalk.step` returns the reward of the terms with a derivative; the full reward
+  is in its log.  The two counting terms reach the learner only through the learned value of W3.
+- **Results** (`steps/W2.sh`, 25 min on one core):
+  - Signals against MuJoCo on a random moving robot: centre of mass, angular momentum, foot position and velocity
+    agree to 1e-8.  Single reward terms agree with Eric's formulas on hand-made inputs.
+  - Eric's `walk_v9` in `WalkEnv` (16 robots, 10 s per command, quiet), a check of the environment: no falls on
+    stand, 0.5 and 1.0 m/s forward, 0.5 m/s back, 0.5 m/s sideways, a turn of 1 rad/s; speed error 0.05-0.10 m/s;
+    105 W at 0.5 m/s, 182 W at 1.0 m/s (standing: 7 W).  In MuJoCo (`eval_mujoco.py`): the same six commands, no
+    falls, speed error 0.00-0.07 m/s.
+  - Both plants pay the same: `walk_v9`'s actions on the C++ plant and on the Python plant for 0.8 s (first steps
+    included): every reward term of every step within 1e-5, the plant states within 1e-14.
+  - **The derivative while walking** (`python -m mbrl.grad.check --task walk --steps 5 20 50`: `walk_v9` walks for
+    2 s at 0.5 m/s, its next K actions are replayed open loop, cost = minus the differentiable rewards, autograd
+    against finite differences):
+
+    | window | foot landings and lift-offs inside | worst relative error | gradient norm | first / last control step |
+    |---|---|---|---|---|
+    | 5 control steps (0.1 s) | 1 | 3.8e-8 | 0.12 | 0.081 / 0.003 |
+    | 20 (0.4 s) | 3 | 3.1e-7 | 0.29 | 0.119 / 0.002 |
+    | 50 (1.0 s) | 8 | 5.6e-7 | 0.73 | 0.207 / 0.007 |
+
+    The derivative is right through repeated steps, and it does not blow up: its norm grows about as the window
+    does (the cost grows the same way: 0.82, 3.5, 8.8).  So the window length for walking can be chosen for
+    speed and memory, not out of fear of exploding gradients, at least up to 1 s around a working gait.  Not
+    covered: a falling or stumbling robot (far from a gait), and the ball.
+  - The learner's window on the walk task with noise, pushes, changing delays, gain errors and a request that
+    changes inside the window: step by step = one graph to 1e-8 (`tests/test_grad_walk.py`).
+- **Found on the way: which joint velocity an environment reads.**  The two plants agree in state to 1e-15, but the
+  C++ plant reports the velocity of the last plant step (nu with p = M(q_n) nu), and `GradStand` reads
+  M(q_{n+1})^-1 p after it.  They differ by up to 2e-2 rad/s while walking.  The Python plant now reports the
+  step's velocity too (`StepInfo.extra["nu"]`), and both walk environments use it.  `GradStand` was left as it is,
+  so the standing result (W1) stays reproducible; its policy was scored on the C++ plant anyway.
+- **Not done here, by plan:** training (W5), Eric's top-speed curriculum gate (`WalkTask.top_speed` and
+  `command_scale` are the knobs the training will turn), a PPO training script for the comparison row (W5),
+  randomised masses / ground stiffness / friction (the pH plant's own parameters are used).
+- `GradWalk.terminal_cost` is a place holder (the end state's tracking and posture terms, charged for 1 s more);
+  W3 replaces it.
 
 ### W3: a learned value in place of the fixed term 2
 - Walking has no fixed goal state at the end of a window.  `mbrl/grad/train.py` gets a value network fitted on the
