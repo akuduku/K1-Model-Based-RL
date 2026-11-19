@@ -4,7 +4,7 @@ This file is the working plan of the thesis experiments: the rules, what exists,
 package has a goal, the files it touches, what to reuse, and a check that says it is done. Update the status tables
 when a package is finished.
 
-## Start here (state of 18 Nov 2026)
+## Start here (state of 19 Nov 2026)
 
 - **The thesis method** (decided by the user on 16 Nov): the professor's formula as written
   (`MA/ph_formula_rl_mbrl.pdf`): minimise L = running cost (term 1) + cost at the end (term 2) over the
@@ -20,14 +20,16 @@ when a package is finished.
   (`Full Body/rl/walk/task.py`), on the C++ plant (`rl/walk/env.py`) and on the differentiable plant
   (`mbrl/grad/walk_env.py`).  Both pay the same for the same motion, and the derivative is right while the robot
   walks (within 6e-7 over 1 s with 8 foot landings and lift-offs) and does not blow up.  Nothing is trained yet.
-- **Term 2 learned (W3, 17 Nov, laptop):** a free value network failed twice (its slope has nothing to do with the
-  physics); term 2 with learned weights works: the costs the end state causes, each weighted by how long it will
-  last, learned from the returns, starting at the fixed term 2.  Same laptop budget as the fixed run (16 robots,
-  40 min, seed 1): 1.3 % falls / 3.1 W against 5.2 % / 2.6 W, and no swing between evaluations.  Numbers: W3.
+- **Term 2 learned (W3, done 19 Nov):** a free value network failed twice on the laptop (its slope has nothing to
+  do with the physics); term 2 with learned weights works: the costs the end state causes, each weighted by how long
+  it will last, learned from the returns, starting at the fixed term 2.  Kaggle `grad-stand-weights` (the settings
+  of `grad-stand-v1c`, only term 2 changed): best in-run checkpoint (update 40, 0.82 M steps, 1.4 h) 0.5 % falls /
+  2.4 W, tilt 0.30°, stands 20 s in MuJoCo.  So the fixed term 2's quality in half the training, standing
+  straighter.  Open: the weights keep growing over a run and the power with them (3.5 W at the end).  Numbers: W3.
 - **Every step can be repeated by name:** `steps/W0.sh` ... `steps/W3.sh` (`steps/list.sh`, `steps/README.md`);
   each finished step has a git tag of the same name in both repositories.
-- **Next:** the Kaggle comparison run of W3 (`steps/W3.sh launch`, the user's launch, 6 h), then W1's seeds 2 and 3
-  with whichever term 2 wins, then W4 (speed) and W5 (train the walk).
+- **Next:** the user decides which term 2 W1's seeds 2 and 3 use (recommended: the learned weights), then W4
+  (speed) and W5 (train the walk).
 - The planner (`mbrl/mpc`, packages 3-5 below) and PPO on pH are **comparison rows** now, not the thesis method.
 - Commands: tests `scripts/test_all.sh`; Kaggle runs are started by the user (`kaggle/run.sh`, commit and push
   first); Python: `~/Dokumente/Robotics/venv/bin/python`; on the laptop one gradient job at a time (7 GB of memory)
@@ -78,7 +80,7 @@ walk policy and can start from his kick motion) is a **reference**, not the mode
 
 | Stage | Skill | Agent contract | PPO arm | Model-based arm |
 |---|---|---|---|---|
-| 1 | stand under pushes | firmware `stand`, 72 -> 22 (`rl/stand`) | done: `stand-ph-v1` (3000 iterations, ~295 M steps, 7 h on a T4, no falls) | planner: `mb-stand-v1` + fix (6.8 W, 5.5 % falls); **thesis method: `grad-stand-v1c` (1.6 M steps, 2.9 h on a T4: 1.0 % falls, 2.3 W); seeds 2 and 3 open (W1)** |
+| 1 | stand under pushes | firmware `stand`, 72 -> 22 (`rl/stand`) | done: `stand-ph-v1` (3000 iterations, ~295 M steps, 7 h on a T4, no falls) | planner: `mb-stand-v1` + fix (6.8 W, 5.5 % falls); **thesis method: `grad-stand-v1c` (1.6 M steps, 2.9 h on a T4: 1.0 % falls, 2.3 W); with term 2's weights learned (W3): `grad-stand-weights` (0.82 M steps, 1.4 h: 0.5 % falls, 2.4 W); seeds 2 and 3 open (W1)** |
 | 2 | walk on velocity commands, standing included; run = higher commands | sprint family, 75 -> 22 | task done (W2); training open (W5) | task done and checked (W2); training open (W3-W5) |
 | 3 | kick from standing | kick_walk, 165 (166 with the request clock) -> 22 | open (W6) | open (W6) |
 | 4 | walk, stay and kick | kick_walk | open (W6) | open (W6) |
@@ -140,9 +142,10 @@ Reference rows for stage 1 (`python rl/stand/evaluate.py --policy <file> -B 128`
 | doing nothing (`--policy zero`) | 100 % | 3.1 s | 8.6 W | 6.2° |
 | PPO `stand-ph-v1` (`deploy_2999.bin`, 295 M executed steps) | 0 % | 10.0 s | 2.1 W | 0.33° |
 | model-based, laptop (`policies/mb-stand-laptop3_346.bin`, 0.53 M executed + 21 M model steps, 85 min on 6 CPU cores) | 11.7 % | 9.65 s | 14.4 W | 2.5° |
-
 | **professor's formula, Kaggle `grad-stand-v1c`, best in-run checkpoint** (`policies/grad-stand-v1c_80.bin`: 1024 robots, 1.64 M environment steps, 2.9 h on a T4; training seed 1; scored with seeds 7, 8, 9 = 384 episodes) | **1.0 %** | 9.98 s | **2.3 W** | 0.46° |
 | the same run at its end (`policies/grad-stand-v1c_155.bin`, 3.17 M steps, 5.6 h; same 384 episodes) | 0.5 % | 10.0 s | 2.4 W | 0.54° |
+| **professor's formula with term 2's weights learned (W3), Kaggle `grad-stand-weights`, best in-run checkpoint** (`policies/grad-stand-weights_40.bin`: 1024 robots, 0.82 M environment steps, 1.4 h on a T4; training seed 1; same 384 episodes) | **0.5 %** | 9.99 s | **2.4 W** | 0.30° |
+| the same run at its end (`policies/grad-stand-weights_164.bin`, 3.36 M steps, 5.6 h; same 384 episodes) | 0.5 % | 9.99 s | 3.5 W | 0.32° |
 | **professor's formula, from scratch on the laptop** (`policies/grad-stand-laptop_74.bin`: gradients through the pH model, 16 robots, 23 680 environment steps, 41 min on one CPU core; one seed) | **2.3 %** | 9.94 s | **2.8 W** | 0.68° |
 | the same run at update 41 (`policies/grad-stand-laptop_41.bin`, 13 120 steps, 20 min) | 6.2 % | 9.86 s | 2.5 W | 0.73° |
 | planner with the fix of 16 Nov (`policies/mb-stand-s05_392.bin`, from `mb-stand-v1`'s best + 50 min laptop) | 5.5 % | 9.87 s | 6.8 W | 0.99° |
@@ -150,9 +153,11 @@ Reference rows for stage 1 (`python rl/stand/evaluate.py --policy <file> -B 128`
 | model-based, Kaggle `mb-stand-v1`, end of the run (`policies/mb-stand-v1_708.bin`, 4.35 M executed + 174 M model steps, 6 h) | 10.2 % | 9.73 s | 24.6 W | 2.1° |
 
 Without pushes and noise (`--quiet`): PPO 0 % falls, 1.0 W; professor's formula on Kaggle 0 % falls, 1.1 W, tilt
-0.15° (update 80) and 1.2 W, 0.59° (end); on the laptop 0 % falls, 0.9 W (update 74) and 0.8 W (update 41); planner with the fix 0 %, 5.3 W; model-based 0 % falls at 13.3 W (best) and 20.9 W (end).
-In MuJoCo (`rl/stand/eval_mujoco.py --seconds 20`, quiet and `--push 0.3`): all three stand the 20 s; largest tilt
-PPO 0.4° / 0.7°, professor's formula (`grad-stand-v1c`) 0.7° / 1.6° (update 80) and 0.9° / 1.4° (end),
+0.15° (update 80) and 1.2 W, 0.59° (end); with learned term-2 weights 0 % falls, 1.0 W, 0.22° (update 40) and 1.4 W,
+0.06° (end); on the laptop 0 % falls, 0.9 W (update 74) and 0.8 W (update 41); planner with the fix 0 %, 5.3 W; model-based 0 % falls at 13.3 W (best) and 20.9 W (end).
+In MuJoCo (`rl/stand/eval_mujoco.py --seconds 20`, quiet and `--push 0.3`): all of them stand the 20 s; largest tilt
+PPO 0.4° / 0.7°, professor's formula (`grad-stand-v1c`) 0.7° / 1.6° (update 80) and 0.9° / 1.4° (end), with learned
+term-2 weights (`grad-stand-weights`) 0.1° / 0.7° (update 40) and 0.4° / 0.7° (end),
 model-based best 3.9° / 3.9°, model-based end 1.5° / 2.1°.
 
 **Stage 1 as it stands (16 Nov): the model-based arm learns to stand from scratch with about 1 M executed steps
@@ -450,7 +455,7 @@ neither breaks nor blows up the derivative.  Not covered by this: repeated steps
 - `GradWalk.terminal_cost` is a place holder (the end state's tracking and posture terms, charged for 1 s more);
   W3 replaces it.
 
-### W3: a learned value in place of the fixed term 2  **Laptop: works (17 Nov); Kaggle comparison open.**  Repeat: `steps/W3.sh check | laptop | launch | score`
+### W3: a learned value in place of the fixed term 2  **Done 19 Nov: yes, with learned weights.**  Repeat: `steps/W3.sh check | laptop | launch | score`
 - **Why:** term 2 of the professor's formula charges the state at the end of a window against a goal state x_T.
   Standing has one (upright, home pose, at rest); walking has none.  So term 2 becomes **-V(x(T))**: minus the reward
   the robot can still expect from x(T) on, learned from what the robots really get.  The learner maximises
@@ -549,13 +554,45 @@ neither breaks nor blows up the derivative.  Not covered by this: repeated steps
     | size of that slope against the fixed term 2's | 10-20 times | 2 times (the weights grew) |
     | gradient of the last control step against the fixed term 2's | 300 times | the same |
 
-  - **Not shown yet:** one training seed of 16 robots each, and laptop runs swing (the fixed run between 3 % and
-    27 %).  The test that decides is the Kaggle run with the settings of `grad-stand-v1c` (1024 robots, 6 h, seed 1)
-    and `--term2 weights`: `steps/W3.sh launch`, run name `grad-stand-weights` (the user's launch).
-  - **Then:** if it is at least as good as `grad-stand-v1c` (1.0 % falls / 2.3 W), the learned weights become the
-    method's term 2, and W1's seeds 2 and 3 are run with them (so they wait for this run).  If not, standing keeps
-    the fixed term 2, and walking (which has no goal state) starts from its own learned weights in W5.  Tag `W3`
-    in both repositories after the Kaggle run.
+  - Not shown by the laptop: one training seed of 16 robots each, and laptop runs swing (the fixed run between 3 %
+    and 27 %).  So the Kaggle run below decides.
+- **The Kaggle comparison (18 Nov): `grad-stand-weights`**, the settings of `grad-stand-v1c` (1024 robots, window 20,
+  6 h, seed 1) with only `--term2 weights` added (repeat: `steps/W3.sh launch`, `fetch`, `score`).  164 updates in
+  5.6 h (123 s each; v1c 129 s), 3.36 M environment steps.  In-run evaluations (128 robots, every 10 updates):
+
+  | update | 10 | 20 | 30 | 40 | 50 | 60 | 70 | 80 | 90 | 100 | 110 | 120 | 130 | 140 | 150 | 160 |
+  |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+  | fixed term 2 (v1c), falls % | 5.5 | 2.3 | 0.8 | 0.8 | 3.1 | 2.3 | 0 | 0 | 1.6 | 0 | 3.1 | 0.8 | 0 | 0 | 0 | |
+  | learned weights, falls % | 5.5 | 0.8 | 3.1 | 0 | 0.8 | 0.8 | 1.6 | 0 | 3.1 | 0 | 0 | 0.8 | 0.8 | 0.8 | 0 | 0 |
+  | fixed term 2 (v1c), W | 2.65 | 2.19 | 2.06 | 2.16 | 2.42 | 2.36 | 2.32 | 2.17 | 2.38 | 2.26 | 2.52 | 2.44 | 2.46 | 2.51 | 2.36 | |
+  | learned weights, W | 2.66 | 2.25 | 2.44 | 2.33 | 2.56 | 2.67 | 2.87 | 2.90 | 3.19 | 3.10 | 3.19 | 3.42 | 3.48 | 3.42 | 3.39 | 3.48 |
+
+  Quiet: 0 % falls at every evaluation in both runs; the quiet tilt stays at 0.04-0.21° with learned weights
+  (v1c: it grows from 0.08° to 0.62°, the lean noted under W1).  Scored as W1 (3 seeds x 128 robots with pushes
+  and noise, once quiet, 20 s in MuJoCo):
+
+  | term 2 | checkpoint | steps, time | falls with pushes | power | tilt | quiet | MuJoCo 20 s, quiet / push 0.3 m/s |
+  |---|---|---|---|---|---|---|---|
+  | fixed (`grad-stand-v1c`) | update 80 (best) | 1.64 M, 2.9 h | 1.0 % (4 of 384) | 2.3 W | 0.46° | 0 %, 1.1 W, 0.15° | stands, 0.7° / 1.6° |
+  | fixed | update 155 (end) | 3.17 M, 5.6 h | 0.5 % (2 of 384) | 2.4 W | 0.54° | 0 %, 1.2 W, 0.59° | stands, 0.9° / 1.4° |
+  | learned weights (`grad-stand-weights`) | update 40 (best) | 0.82 M, 1.4 h | 0.5 % (2 of 384) | 2.4 W | 0.30° | 0 %, 1.0 W, 0.22° | stands, 0.1° / 0.7° |
+  | learned weights | update 164 (end) | 3.36 M, 5.6 h | 0.5 % (2 of 384) | 3.5 W | 0.32° | 0 %, 1.4 W, 0.06° | stands, 0.4° / 0.7° |
+
+  - **Answer to W3: yes.**  The learned term 2 reaches the fixed term 2's quality (falls and power the same within
+    the noise of 384 episodes: 2 against 4 falls, 2.4 against 2.3 W) with half the environment steps and half the
+    time, and the robot stands straighter on both plants (tilt 0.30° against 0.46° on the pH plant, a third to a
+    half of v1c's tilt in MuJoCo).  One training seed each.
+  - **The weights do not settle** (seconds, at update 40 / 80 / 164): orientation 6.3 / 7.7 / 8.7, base height
+    0.01 / 0 / 0, pose 2.9 / 3.8 / 5.9, kinetic energy 1.2 / 1.5 / 1.3 per J, trunk speed 0.8 / 1.2 / 1.6, trunk
+    turning 0.7 / 0.05 / 0.01, joint speed 0 / 0.3 / 0.5.  The posture weights keep growing, and the power grows
+    with them (2.3 W at update 40, 3.5 W at the end), most likely because the energy is a cost of the actions and
+    not in term 2, so posture weighs more and more against it.  Falls do not change.  The checkpoint rule (best
+    in-run evaluation) picks an early checkpoint, so standing's result does not suffer; the long walking runs (W5)
+    need a limit on the weights or the energy in term 2.  Decide there, on walking's own numbers.
+- **Open, the user's decision:** which term 2 W1's seeds 2 and 3 use.  Recommended: the learned weights
+  (`--term2 weights`), the term 2 walking needs anyway, so that standing and walking are one method;
+  `grad-stand-weights` is then their seed 1, and `grad-stand-v1c` stays as the comparison row "term 2 written by
+  hand".
 
 ### W4: speed for walking
 - In the gradient plant only: the 8 sole contact points instead of 128 (most of the 14 MB per robot is contact

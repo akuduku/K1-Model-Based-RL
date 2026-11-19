@@ -13,7 +13,10 @@
 # Then:   17 Nov 2026, laptop (logs/grad-stand-weights-laptop): in-run falls with pushes 1.6, 0, 3.1, 1.6 % (fixed
 #         term 2 on 16 Nov: 26.6, 3.1, 26.6, 4.7 %); scored update 48: 5 of 384 fell (1.3 %), 3.1 W, quiet 0 %
 #         0.9 W, MuJoCo stood 20 s quiet and pushed (fixed, update 41: 20 of 384 fell (5.2 %), 2.6 W).
-#         term2_diag on model_48: action gradient against the fixed term 2's, cosine +0.97.  Kaggle comparison: open
+#         term2_diag on model_48: action gradient against the fixed term 2's, cosine +0.97.
+#         19 Nov 2026 (tag W3), Kaggle grad-stand-weights: best in-run update 40 (0.82 M steps, 1.4 h): 2 of 384 fell
+#         (0.5 %), 2.4 W, tilt 0.30 deg, quiet 0 % 1.0 W, MuJoCo stood 20 s (0.1 / 0.7 deg); end (update 164):
+#         0.5 %, 3.5 W.  Fixed term 2 (grad-stand-v1c, update 80, 1.64 M steps, 2.9 h): 1.0 %, 2.3 W, 0.46 deg
 set -euo pipefail
 . "$(dirname "$0")/common.sh"
 NAME=grad-stand-weights
