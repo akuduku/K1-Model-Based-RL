@@ -79,8 +79,19 @@ def window(env: GradStand, policy: MLP, args, alive_age: torch.Tensor | None = N
     B, K, dev = env.B, args.steps, env.device
     crits, full_rewards = [], []
     walk_stats = {"speed_error": [], "requested_speed": [], "feet_air": [], "slip_speed": []}   # walking only
+    # the Hamiltonian's flows (what the battery supplies, what turns into heat where) and every reward term: sums
+    # over the live robots and control steps, as tensors (no wait for the GPU in every step)
+    flows, terms_sum, live_steps = {}, {}, 0.0
     t_start = time.time()
     env.detach()
+    # the energy balance per robot over the window: supplied - heat - change of H.  Not zero: the plant's implicit
+    # Euler step damps fast current changes (1/2 L di^2 per 1 ms step, Full Body ph_k1/plant.py) and the ledger does
+    # not book it; pushes add energy outside the ledger, so pushed robots are left out
+    with torch.no_grad():
+        H_start = env.plant.energy()["total"]
+    supplied_r = torch.zeros(B, dtype=H_start.dtype, device=dev)
+    heat_r = torch.zeros(B, dtype=H_start.dtype, device=dev)
+    pushed = torch.zeros(B, dtype=torch.bool, device=dev)
     states, noises, epss, pushes, lives, falls, discs = [], [], [], [], [], [], []
     obs_list, act_list, grads = [], [], []
     alive = torch.ones(B, dtype=torch.bool, device=dev)
@@ -107,6 +118,21 @@ def window(env: GradStand, policy: MLP, args, alive_age: torch.Tensor | None = N
                                ("feet_air", "feet_air"), ("slip_speed", "slip_speed")):
                     if info.get(key) is not None:
                         walk_stats[k].append(float((info[key] * live).sum() / live.sum().clamp_min(1.0)))
+            for key in ("supplied_W", "copper_W", "gearbox_W", "contact_W", "stops_W"):
+                if info.get(key) is not None:
+                    flows[key] = flows.get(key, 0.0) + (info[key] * live).sum()
+                    if key == "supplied_W":
+                        supplied_r = supplied_r + info[key] * POLICY_DT
+                    else:
+                        heat_r = heat_r + info[key] * POLICY_DT
+            if push is not None:
+                pushed |= push.abs().sum(-1) > 0
+            for k, v in info.get("terms", {}).items():
+                terms_sum[k] = terms_sum.get(k, 0.0) + (v * live).sum()
+            if "reward_all" in info:
+                terms_sum["(full reward)"] = terms_sum.get("(full reward)", 0.0) + (info["reward_all"] * live).sum()
+                terms_sum["(differentiated)"] = terms_sum.get("(differentiated)", 0.0) + (r * live).sum()
+            live_steps = live_steps + live.sum()
             fallen = env.fallen() & alive
             fall_cost = torch.zeros_like(r)
             if bool(fallen.any()):      # the end state of a fall is far from x_T: term 2, charged now
@@ -123,6 +149,22 @@ def window(env: GradStand, policy: MLP, args, alive_age: torch.Tensor | None = N
             alive &= ~fallen
             disc *= args.gamma
         end = env.get_state()
+        # the Hamiltonian's tanks at the window's end (robots still up), and the energy the PD law adds to it: the
+        # closed-loop H_d = H + sum 1/2 kp (theta - target)^2 (the motor law is a virtual spring to the target)
+        energy_end = {}
+        if bool(alive.any()):
+            tanks = env.plant.energy()
+            for k in ("kinetic", "gravity", "contact", "stops", "coil", "total"):
+                energy_end[f"H_{k}_J"] = float(tanks[k][alive].mean())
+            if getattr(env, "motor_target", None) is not None and getattr(env, "kp", None) is not None:
+                shaping = 0.5 * (env.kp * (env.plant.q[:, 7:] - env.motor_target) ** 2).sum(-1)
+                energy_end["Hd_shaping_J"] = float(shaping[alive].mean())
+                energy_end["Hd_total_J"] = energy_end["H_total_J"] + energy_end["Hd_shaping_J"]
+            clean = alive & ~pushed
+            if "supplied_W" in flows and bool(clean.any()):
+                unbooked = supplied_r - heat_r - (tanks["total"] - H_start)
+                energy_end["unbooked_W"] = float(unbooked[clean].mean()) / (K * POLICY_DT)
+                energy_end["unbooked_share"] = float(unbooked[clean].sum() / supplied_r[clean].sum().clamp_min(1e-9))
         value_out = {}
         if value is not None:       # the targets of V: TD(lambda) returns, bootstrapped with V's target copy
             from mbrl.grad.value import lambda_returns
@@ -146,12 +188,19 @@ def window(env: GradStand, policy: MLP, args, alive_age: torch.Tensor | None = N
         g = torch.autograd.grad(objective_part, list(leaves.values()), allow_unused=True)
         return {k: (torch.zeros_like(leaves[k]) if gi is None else gi) for k, gi in zip(leaves, g)}
 
+    quantiles = torch.tensor([0.1, 0.5, 0.9], dtype=torch.float64)
+
+    def costate_sizes(lam) -> dict:   # per robot |lambda| of the positions, momenta, coil fluxes: 10 %, median, 90 %
+        return {name: torch.quantile(lam[key].detach().flatten(1).norm(dim=-1).double().cpu(), quantiles).tolist()
+                for key, name in (("q", "q"), ("p", "p"), ("lam", "flux")) if key in lam}
+
     # the end of the window: term 2
     leaves = leaves_of(end)
     env.set_state({**end, **leaves})
     term2 = end_cost(env, args, value, value_weight)
     lam = co_state(-disc * (term2 * alive.to(term2.dtype)).mean(), leaves)
     objective -= disc * float((term2.detach() * alive.to(term2.dtype)).mean())
+    sizes = [costate_sizes(lam)]      # the co-state at the end, then before every step going back
     for t in reversed(range(K)):
         leaves = leaves_of(states[t])
         env.set_state({**states[t], **leaves})
@@ -165,17 +214,31 @@ def window(env: GradStand, policy: MLP, args, alive_age: torch.Tensor | None = N
         after = env.get_state()
         part = part + sum((lam[k] * after[k]).sum() for k in env.FLOAT_STATE)     # everything later, through this step
         lam = co_state(part, leaves)
+        sizes.append(costate_sizes(lam))
     env.set_state(end)               # the next window goes on from the end of this one
     g = torch.stack(grads[::-1])     # the hooks ran last step first; they saw d(objective)/d(action)
     norms = g.norm(dim=-1)
+    # the derivative through the pH model, step by step: the action gradient's size per control step and the
+    # co-state's before every step (index 0) up to the window's end (index K); 10 %, median, 90 % over the robots
+    sizes = sizes[::-1]
+    trace = {"g": torch.quantile(norms.detach().double().cpu(), quantiles, dim=1).T.tolist(),
+             **{name: [s[name] for s in sizes] for name in sizes[0]}}
+    gradient = {"action_first_step": trace["g"][0][1], "action_middle_step": trace["g"][K // 2][1],
+                "action_last_step": trace["g"][-1][1]}
+    for name in sizes[0]:
+        gradient[f"costate_{name}_end"], gradient[f"costate_{name}_start"] = trace[name][-1][1], trace[name][0][1]
+    n_live = max(float(live_steps), 1.0)
     return {**value_out, "obs": torch.stack(obs_list), "act": torch.stack(act_list), "g": g, "fell": fell_now,
             "stats": {"reward_step": reward_sum / (B * K), "copper_W": sum(watts) / len(watts),
                       "term2": float(term2.detach().mean()), "grad_median": float(norms.median()),
                       "grad_max_over_median": float(norms.max() / norms.median().clamp_min(1e-30)),
                       "clipped": float((norms >= 0.999 * args.clip * norms.median(dim=1, keepdim=True).values).float().mean()),
                       "fell": float(fell_now.float().mean()), "objective": objective,
-                      "seconds_forward": t_forward, "seconds_backward": time.time() - t_start - t_forward,
-                      **{k: sum(v) / len(v) for k, v in walk_stats.items() if v}}}
+                      "seconds_forward": t_forward, "seconds_backward": time.time() - t_start - t_forward},
+            "walk": {k: sum(v) / len(v) for k, v in walk_stats.items() if v},
+            "energy": {**{k: float(v) / n_live for k, v in flows.items()}, **energy_end},
+            "reward": {k: float(v) / n_live for k, v in terms_sum.items()},
+            "gradient": gradient, "trace": trace}
 
 
 def window_one_graph(env: GradStand, policy: MLP, args, value=None, value_weight: float = 1.0) -> torch.Tensor:
@@ -282,6 +345,9 @@ def main():
     ap.add_argument("--eval-every-min", type=float, default=20.0)
     ap.add_argument("--eval-robots", type=int, default=64, help="robots of the evaluation on the C++ plant; 0 = none")
     ap.add_argument("--eval-device", default="cpu")
+    ap.add_argument("--videos", action="store_true",
+                    help="walk: with every evaluation a video of the policy (needs MuJoCo rendering: MUJOCO_GL=egl on "
+                         "a GPU machine) and the Hamiltonian figure of that episode")
     ap.add_argument("--resume", default=None, help="model_<it>.pt to continue from")
     ap.add_argument("--device", default="cpu")
     ap.add_argument("--dtype", default="float64")
@@ -422,6 +488,41 @@ def main():
             print(f"[export] failed: {type(exc).__name__}: {exc}", flush=True)
         return path
 
+    video = None
+    if walk and args.videos:   # one quiet episode on the C++ plant, the requests changing, and its Hamiltonian figure
+        from rl.walk.env import WalkConfig
+        from rl.walk.video import WalkVideo
+        video = WalkVideo(WalkConfig(num_envs=1, device="cpu", dtype="float32", seed=args.seed), run_dir / "videos")
+
+    def make_media(it: int, w: dict) -> dict:
+        """With every evaluation: the derivative through the pH model in this update's window (figures.py), and with
+        --videos a video of the policy and the Hamiltonian figure of that episode.  -> {W&B key: file}."""
+        from mbrl.grad.figures import gradient_figure
+
+        out = {}
+        try:
+            out["Gradient/through_window"] = gradient_figure(
+                w["trace"], run_dir / "figures" / f"gradient_{it:05d}.png", POLICY_DT,
+                title=f"update {it}: the derivative through the pH model in one window of {args.steps} control steps, "
+                      f"{args.robots} robots")
+        except Exception as exc:  # noqa: BLE001  (a figure must never end a training)
+            print(f"[figure] failed: {type(exc).__name__}: {exc}", flush=True)
+        if video is not None:
+            result = video(act, it)
+            path, extra = result if isinstance(result, tuple) else (result, {})
+            out.update({k: v for k, v in extra.items() if v})
+            if path:
+                out["Video/walk"] = path
+        return out
+
+    def to_wandb(media: dict) -> dict:
+        if not media:
+            return {}
+        import wandb
+
+        return {k: (wandb.Video(str(v), format="mp4") if str(v).endswith(".mp4") else wandb.Image(str(v)))
+                for k, v in media.items()}
+
     print(f"[grad] {args.task} from scratch: {args.robots} robots x {args.steps} control steps per window on {args.device} "
           f"({args.dtype}), world {'quiet' if args.quiet else 'with noise, pushes, delay'}, logs -> {run_dir}"
           + (f"; requests x {curriculum['scale']:g} (curriculum up to {args.command_scale_max:g})" if walk else ""),
@@ -434,7 +535,8 @@ def main():
     max_age = round(args.episode_s / POLICY_DT)
     # staggered ages: every window contains robots that have just started, not only robots in the middle of a stand
     age = torch.rand(args.robots, device=env.device) * max_age
-    falls = 0
+    falls = episodes = 0
+    w = None
     with open(run_dir / "metrics.jsonl", "a") as metrics:
         try:
             while iteration < args.iterations and stop["why"] is None:
@@ -475,12 +577,17 @@ def main():
                 target = w["act"] + delta * g / g.square().mean().sqrt().clamp_min(1e-30)
                 obs_b, target_b = w["obs"].flatten(0, 1), target.flatten(0, 1)
                 policy.obs_normalizer.update(obs_b)
+                with torch.no_grad():
+                    before = policy(obs_b)
                 loss = torch.zeros(())
                 for _ in range(args.regress):                      # the network follows the improved actions
                     opt.zero_grad()
                     loss = (policy(obs_b) - target_b).square().mean()
                     loss.backward()
                     opt.step()
+                with torch.no_grad():   # how far the network's actions moved, against the step the targets asked for
+                    change = float((policy(obs_b) - before).square().mean().sqrt())
+                learn_row = {"Learn/action_change": change, "Learn/step_taken": change / max(delta, 1e-12)}
                 value_row = {}
                 if learner_v is not None:                          # V learns from this window's returns
                     fit = learner_v.fit(w["critic"][w["valid"]], w["value_target"][w["valid"]])
@@ -490,15 +597,20 @@ def main():
                 age += args.steps
                 again = w["fell"] | (age >= max_age)
                 falls += int(w["fell"].sum())
+                episode_row = {}
                 if bool(again.any()):
                     ids = again.nonzero().squeeze(-1)
+                    episodes += int(ids.numel())                   # episodes that ended: how long they lasted
+                    episode_row = {"Train/episode_s": float(age[ids].mean()) * POLICY_DT,
+                                   "Train/fall_share": float(w["fell"][ids].float().mean())}
                     env.reset(ids)
                     age[ids] = 0
+                episode_row.update({"Train/episodes": episodes, "Train/falls": falls})
                 iteration += 1
                 env_steps += args.robots * args.steps
                 walk_row = {}
                 if walk:                                           # the curriculum: one step up when it walks well
-                    s = w["stats"]
+                    s = {**w["stats"], **w["walk"]}
                     curriculum["recent"] = (curriculum["recent"] + [(s["fell"], s["speed_error"], s["requested_speed"])]
                                             )[-args.curriculum_updates:]
                     new = next_command_scale(curriculum["scale"], curriculum["recent"], args)
@@ -510,7 +622,11 @@ def main():
                 now = time.time()
                 row = {"iteration": iteration, "Cost/executed_steps": env_steps, "Cost/seconds": now - t_it,
                        "Learn/fit_loss": float(loss.detach()), "Learn/delta": delta, **{f"Grad/{k}": v for k, v in w["stats"].items()},
-                       **value_row, **walk_row}
+                       **value_row, **walk_row, **learn_row, **episode_row,
+                       **{f"Gradient/{k}": v for k, v in w["gradient"].items()},
+                       **{f"Energy/{k}": v for k, v in w["energy"].items()},
+                       **{f"Reward/{k}": v for k, v in w["reward"].items()},
+                       **{f"Walk/{k}": v for k, v in w["walk"].items()}}
                 evaluated = False
                 if evaluate is not None and args.eval_every_min > 0 and (now - last["eval"]) / 60 >= args.eval_every_min:
                     try:
@@ -523,11 +639,12 @@ def main():
                 if evaluated or (args.save_every_min > 0 and (now - last["save"]) / 60 >= args.save_every_min):
                     save()
                     last["save"] = time.time()
-                metrics.write(json.dumps(row) + "\n")
+                media = make_media(iteration, w) if evaluated else {}     # with every evaluation: figures, video
+                metrics.write(json.dumps({**row, **{f"{k} (file)": str(v) for k, v in media.items()}}) + "\n")
                 metrics.flush()
                 if run is not None:
-                    run.log(row, step=iteration)
-                s = w["stats"]
+                    run.log({**row, **to_wandb(media)}, step=iteration)
+                s = {**w["stats"], **w["walk"]}
                 extra = "".join(f"  {k.split('/')[-1]} {v:.3g}" for k, v in row.items() if k.startswith("Eval/"))
                 print(f"[grad] it {iteration:4d}  steps {env_steps:8d}  reward/step {s['reward_step']:+.4f}  copper "
                       f"{s['copper_W']:6.1f} W  term2 {s['term2']:7.3f}  fell {s['fell']:.0%}  |g| {s['grad_median']:.3g} "
@@ -549,8 +666,9 @@ def main():
     if evaluate is not None:
         try:
             final = {k: float(v) for k, v in evaluate(act, iteration).items()}
+            media = make_media(iteration, w) if w is not None else {}       # the final policy's figures and video
             if run is not None:
-                run.log(final, step=iteration)
+                run.log({**final, **to_wandb(media)}, step=iteration)
         except Exception as exc:  # noqa: BLE001
             print(f"[eval] failed: {type(exc).__name__}: {exc}", flush=True)
     path = save()

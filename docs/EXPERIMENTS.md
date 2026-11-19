@@ -617,8 +617,46 @@ neither breaks nor blows up the derivative.  Not covered by this: repeated steps
   most 0.2 % of the robot-windows ended in a fall (about 1 robot in 10 per 20 s) and the speed error was at most 30 %
   of the requested speed; up to 1 (Eric's ranges, sprints up to 2 m/s).  It never goes down; it is kept in the
   checkpoint.  Running above 2 m/s (`top_speed`) is a later step.
-- **Logged every update:** speed error and requested speed, the curriculum's level, the share of feet in the air
-  and the sliding speed of the feet on the ground (steps or shuffles?).
+- **What the W&B run shows** (project "Akos pH MB"; also in the run folder: `metrics.jsonl`, `figures/`, `videos/`).
+  To plot against episodes instead of updates, choose `Train/episodes` as a panel's x-axis; against samples:
+  `Cost/executed_steps`.
+  - Every 20 min, with the evaluation:
+    - `Video/walk`: one quiet 10 s episode on the pH plant (stand 2 s, forward 0.5 m/s 4 s, turn 0.5 rad/s 2 s,
+      sideways 0.3 m/s 2 s), the request as a green arrow (`Full Body/rl/walk/video.py`).
+    - `Energy/hamiltonian`, the figure of the same episode (`rl/walk/hamiltonian.py`): (a) the tanks of H and the
+      closed-loop H_d = H + sum 1/2 kp (theta - target)^2 (the motor law's PD is a spring to the policy's target);
+      (b) the ledger, supplied = heat + change of H + not booked; (c, d) H_d over (angle, momentum) of the left knee
+      and hip with the episode's path (a gait shows as a closed orbit, standing as a point; after Sprangers et al.,
+      Fig. 3b).
+    - `Gradient/through_window` (`mbrl/grad/figures.py`): (a) how strongly each control step's action is pushed by
+      the derivative; (b) the co-state, the cost's derivative carried back through the pH model, for positions,
+      momenta and coil fluxes, from the window's end (term 2) to its start.
+    - `Eval/*`: falls, time standing, speed error, yaw error, power, averaged over the six fixed commands;
+      `EvalCommand/<command>/*` per command.  This is the progress measure.
+  - Every update:
+    - `Gradient/*`: the action gradient at the window's first, middle and last step; the co-state's size for q, p
+      and the coil fluxes at the window's end and start.
+    - `Grad/*`: its median, max/median, the share of robots clipped, term 2, the objective, falls per window, seconds.
+    - `Energy/*` over the training robots: power from the battery (`supplied_W`) and the heat in coils, gearboxes,
+      contacts and end stops; the tanks of H at the window's end (`H_kinetic_J`, `H_gravity_J`, ..., `H_total_J`),
+      the PD's spring energy and H_d; `unbooked_W` and `unbooked_share` (see the next bullet).
+    - `Reward/*`: each of Eric's terms per robot and control step as it enters the reward; `(differentiated)` is
+      what the learner differentiates, `(full reward)` adds air time and the fall penalty.
+    - `Walk/*`: speed error and requested speed, the share of feet in the air (steps or shuffles), how fast the feet
+      on the ground slide.  `Curriculum/command_scale`.
+    - `Value/*`: the learned term-2 weights `s_<term>` (14), the level, the fit, the explained variance.
+    - `Learn/*`: the network's fit, the step size, how far its actions moved (`action_change`) and which share of
+      the asked step it made (`step_taken`).
+    - `Train/*`: episodes and falls so far, the length of the episodes that ended, the share of them that fell.
+- **Found 19 Nov: the energy ledger does not book the integrator's damping.**  Over an episode the plant's ledger
+  should close, supplied = heat + change of H.  It does when the joint targets move smoothly (0.014 J of 12.6 J);
+  with targets that jump every 20 ms it does not (small random targets: 2.9 J of 16 J missing; large: 24 J of 68 J).
+  The gap is the damping of the plant's implicit Euler step (`Full Body/ph_k1/plant.py`): 1/2 L (i1 - i0)^2 in the
+  coils and 1/2 dnu^T M dnu in the mechanics per 1 ms step, summed over the same episode 2.867 and 23.856 J against
+  gaps of 2.869 and 23.862 J.  A real motor turns this into heat in a current transient faster than the step; the
+  discrete plant only ever removes energy (it stays passive).  Logged as `Energy/unbooked_W` (robots not pushed in
+  the window; pushes add energy outside the ledger): it should fall as the policy's commands get smoother.  Booking
+  it in the ledger (both plants) is a small plant change for later.
 - **In-run evaluation** (`Full Body/rl/walk/evaluate.py WalkEval`, every 20 min, 64 robots on Kaggle): the six fixed
   commands of W2 (stand, forward 0.5 and 1.0 m/s, back 0.5, sideways 0.5, turn 1 rad/s) with pushes and noise,
   the same at every evaluation, whatever the curriculum asks.  Every evaluated update is saved.

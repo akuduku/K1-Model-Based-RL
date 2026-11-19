@@ -111,7 +111,7 @@ TASK_DEFAULTS = {"stand": {"iterations": 3000, "video_every": 500, "video_every_
                  "mb-stand": {"iterations": 1000000, "video_every": 0, "video_every_min": 30.0},
                  "grad-bench": {"iterations": 0, "video_every": 0, "video_every_min": 0.0},
                  "grad-stand": {"iterations": 1000000, "video_every": 0, "video_every_min": 0.0},
-                 "grad-walk": {"iterations": 1000000, "video_every": 0, "video_every_min": 0.0}}
+                 "grad-walk": {"iterations": 1000000, "video_every": 0, "video_every_min": 20.0}}   # with every evaluation
 REPO = "https://github.com/akuduku/K1-Model-Based-RL.git"
 WORK = Path("/kaggle/working")
 SRC = Path("/tmp/mbrl")
@@ -314,9 +314,11 @@ def main():
             "--dtypes", "float32", "--steps", 20, "--trace"], "benchmark (GPU)")
     elif TASK in ("grad-stand", "grad-walk"):
         # the professor's formula: standing (or walking, W5) from scratch with derivatives of the cost through the
-        # pH model; walking is evaluated on six fixed commands, 64 robots each
+        # pH model; walking is evaluated on six fixed commands, 64 robots each, with a video and the Hamiltonian
+        # figure at every evaluation when the GL backend works
         walk = TASK == "grad-walk"
-        go([py, "-u", "-m", "mbrl.grad.train", *(["--task", "walk"] if walk else []), "--run-name", run_name,
+        go([py, "-u", "-m", "mbrl.grad.train", *(["--task", "walk"] if walk else []),
+            *(["--videos"] if walk and video_every_min > 0 else []), "--run-name", run_name,
             "--robots", GRAD_ROBOTS, "--steps", GRAD_STEPS,
             "--device", GRAD_DEVICE, "--dtype", GRAD_DTYPE, "--minutes", f"{max(budget, 1):.1f}", "--delta-final", 0.01,
             "--save-every-min", SAVE_EVERY_MIN, "--eval-every-min", 20, "--eval-robots", 64 if walk else 128,

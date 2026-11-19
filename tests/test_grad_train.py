@@ -32,7 +32,14 @@ def test_walking_writes_the_policy_file_the_robot_loads(monkeypatch, tmp_path):
     assert config["task"] == "walk" and config["term2"] == "weights" and config["episode_s"] == 20.0
     rows = [json.loads(line) for line in (out / "metrics.jsonl").read_text().splitlines()]
     assert len(rows) == 2 and all(r["Curriculum/command_scale"] == 0.25 for r in rows)
-    assert all(np.isfinite(r[f"Grad/{k}"]) for r in rows for k in ("speed_error", "requested_speed", "feet_air", "slip_speed"))
+    assert all(np.isfinite(r[f"Walk/{k}"]) for r in rows for k in ("speed_error", "requested_speed", "feet_air", "slip_speed"))
+    # what W&B shows besides: the derivative through the pH model, the Hamiltonian, every reward term, the network
+    r = rows[-1]
+    for k in ("Gradient/action_first_step", "Gradient/costate_q_start", "Gradient/costate_p_end",
+              "Energy/supplied_W", "Energy/copper_W", "Energy/H_total_J", "Energy/Hd_total_J", "Energy/unbooked_W",
+              "Reward/track_linear_velocity", "Reward/(differentiated)", "Learn/action_change", "Train/episodes"):
+        assert np.isfinite(r[k]), k
+    assert r["Reward/(differentiated)"] == pytest.approx(sum(r[f"Reward/{k}"] for k in train_terms()), rel=1e-6)
     ck = torch.load(out / "model_2.pt", map_location="cpu", weights_only=False)
     assert ck["infos"]["task"] == "walk" and ck["infos"]["command_scale"] == 0.25
     assert len(ck["infos"]["term2_weights"]) == 14                     # the 14 state terms of walking
@@ -43,6 +50,33 @@ def test_walking_writes_the_policy_file_the_robot_loads(monkeypatch, tmp_path):
         want = policy(obs).numpy()
     got = bin_policy(read_bin(out / "deploy_2.bin"))(obs.numpy())     # the firmware's forward pass on the file
     assert np.abs(got - want).max() < 1e-5
+
+
+def train_terms():
+    """The walk task's terms with a derivative: what the learner differentiates."""
+    from rl.walk.task import COUNTS, REWARDS
+
+    return [k for k in REWARDS if k not in COUNTS]
+
+
+def test_the_gradient_figure_of_a_window(tmp_path):
+    """The figure W&B gets with every evaluation, from a real window: the action gradient per step and the co-state."""
+    from types import SimpleNamespace
+
+    from mbrl.grad.figures import gradient_figure
+    from mbrl.grad.walk_env import GradWalk
+    from rl.walk import contract as C
+
+    torch.manual_seed(1)
+    env = GradWalk(3, seed=4, command=(0.5, 0.0, 0.0))
+    args = SimpleNamespace(steps=3, clip=3.0, action_noise=0.05, gamma=0.99, terminal_seconds=1.0, terminal_kinetic=0.0,
+                           fall_weight=1.0)
+    w = train.window(env, MLP(C.OBS_DIM, C.NJ, last_scale=0.5).double(), args)
+    trace = w["trace"]
+    assert len(trace["g"]) == 3 and all(len(trace[k]) == 4 for k in ("q", "p", "flux"))
+    assert all(lo <= mid <= hi for lo, mid, hi in trace["g"] + trace["q"] + trace["p"])
+    assert trace["flux"][-1][1] == 0.0 and trace["flux"][0][1] > 0.0      # term 2 does not read the coils; step 1 does
+    assert gradient_figure(trace, tmp_path / "g.png", 0.02, title="test").stat().st_size > 10_000
 
 
 def args_(**kw):

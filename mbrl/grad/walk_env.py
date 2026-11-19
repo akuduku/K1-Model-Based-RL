@@ -211,9 +211,13 @@ class GradWalk(GradEnv):
         self.prev_actions, self.actions = self.actions, a
         self.qd, self.gyro = nu[:, 6:], info.extra["gyro"]
         self.sig = sig
+        self.motor_target = info.extra["target"].detach()     # what the PD drives to (logs: the closed-loop H_d)
         with torch.no_grad():
             track = sig.heading_vel if self.task.p.heading_frame else sig.base_lin_vel
-            log = {"copper_W": pl.ledger.copper.detach() / POLICY_DT, "supplied_W": supplied_w.detach(),
+            led = pl.ledger                                    # this control step's energy flows [J] -> [W]
+            log = {"copper_W": led.copper.detach() / POLICY_DT, "supplied_W": supplied_w.detach(),
+                   "gearbox_W": led.gearbox.detach() / POLICY_DT, "contact_W": led.contact.detach() / POLICY_DT,
+                   "stops_W": led.stops.detach() / POLICY_DT,
                    "reward_all": self.task.reward(terms).detach(), "terminated": terminated,
                    "speed_error": torch.linalg.vector_norm(self.mem["target"][:, :2] - track[:, :2], dim=1),
                    "requested": torch.linalg.vector_norm(self.mem["target"][:, :2], dim=1),
