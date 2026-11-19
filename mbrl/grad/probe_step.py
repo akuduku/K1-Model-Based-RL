@@ -13,8 +13,9 @@ contact.
 
 lift (the learner's question without the network): robots start in the sprint's home pose with a request of --vx m/s
 forward; after --settle s of zero actions (the request has ramped up) their next --steps actions are free numbers,
-optimised with Adam on the window's objective as mbrl/grad/train.py builds it: the discounted differentiated reward
-of the robots still up, a fall charged at the fall, and term 2 at the end (the state costs x 1 s, the fixed term 2).
+optimised with Adam on the learner's own window (mbrl/grad/train.py `window`, one control step of memory): the
+discounted differentiated reward of the robots still up, a fall charged at the fall, and term 2 at the end (the
+state costs x 1 s, the fixed term 2).
 Once per weight of the stand-in, from the same start and the same first guess.  -> per weight: how much weight came
 off a foot, how long feet were in the air, how far the trunk went, falls, and the moves the stand-in must not pay for:
 both feet up, a dropping trunk (crouch), tilt, a foot held up past 0.5 s.
@@ -143,53 +144,67 @@ def gait_figure(R: dict, args, out: dict) -> Path:
 
 
 # ------------------------------------------------------------------------------------------------------- lift
-def rollout(env: GradWalk, start: dict, actions: torch.Tensor, args):
-    """The window's objective of open-loop actions (K,B,NA) from `start`, with its graph.  -> (J, numbers, loads)."""
+class OpenLoop:
+    """train.window's "policy" for fixed actions (K,B,NA): the forward pass asks for steps 0..K-1, the backward pass
+    for K-1..0 again.  Zero times the observation keeps the action on the graph's way to the state, so window's hook
+    sees d(objective)/d(action) as it does for a network: the probe follows the learner's own derivative."""
+
+    def __init__(self, actions: torch.Tensor):
+        self.actions, self.calls = actions, 0
+
+    def __call__(self, obs: torch.Tensor) -> torch.Tensor:
+        K = self.actions.shape[0]
+        t = self.calls if self.calls < K else 2 * K - 1 - self.calls
+        self.calls += 1
+        return self.actions[t].to(obs.dtype) + 0.0 * obs[:, :1]
+
+
+def measure(env: GradWalk, start: dict, actions: torch.Tensor, args):
+    """Open-loop actions (K,B,NA) from `start`, no derivative: what the feet and the trunk did.  -> (numbers, loads)."""
     env.set_state({k: v.clone() for k, v in start.items()})
     B, K = env.B, actions.shape[0]
     alive = torch.ones(B, dtype=torch.bool)
-    J, disc = 0.0, 1.0
-    z0, x0 = env.plant.q[:, 2].detach().clone(), env.plant.q[:, 0].detach().clone()
+    z0, x0 = env.plant.q[:, 2].clone(), env.plant.q[:, 0].clone()
     unload_max = torch.zeros(B, dtype=env.dtype)
     stand_sum, air_steps, both_up, steps_up = (torch.zeros(B, dtype=env.dtype) for _ in range(4))
     tilt_max, clock_max = torch.zeros(B, dtype=env.dtype), torch.zeros(B, dtype=env.dtype)
     loads = []
-    for k in range(K):
-        env.between_steps()
-        r, _ = env.step(actions[k])
-        live = alive.to(r.dtype)
-        J = J + disc * (r * live).sum()
-        fallen = env.fallen() & alive
-        if bool(fallen.any()):                               # a fall: term 2 charged at once, nothing after it
-            J = J - disc * (env.terminal_cost(args.terminal_seconds) * fallen.to(r.dtype)).sum()
-        with torch.no_grad():
+    with torch.no_grad():
+        for k in range(K):
+            env.between_steps()
+            env.step(actions[k])
+            live = alive.to(env.dtype)
             f = per_foot(env)
-            up = alive[:, None]
             unload_max = torch.where(alive, torch.maximum(unload_max, f["unload"].max(1).values), unload_max)
             stand_sum += f["stand"].sum(1) * live
-            off = (~f["contact"]) & up
+            off = (~f["contact"]) & alive[:, None]
             air_steps += off.to(env.dtype).sum(1)
             both_up += off.all(1).to(env.dtype)
             steps_up += live
             tilt_max = torch.where(alive, torch.maximum(tilt_max, env.sig.roll_pitch.abs().max(1).values), tilt_max)
             clock_max = torch.where(alive, torch.maximum(clock_max, f["clock"].max(1).values), clock_max)
             loads.append((env.sig.contact_force[..., 2] / env.task.half_weight)[0].tolist())
-        alive = alive & ~fallen
-        disc *= args.gamma
-    J = J - disc * (env.terminal_cost(args.terminal_seconds) * alive.to(env.dtype)).sum()
-    q = env.plant.q.detach()
+            alive = alive & ~env.fallen()
+        q = env.plant.q
     n = steps_up.clamp_min(1.0)
-    numbers = {"objective": float(J.detach()), "unload_max": float(unload_max.mean()),
-               "stand_in_per_step": float((stand_sum / n).mean()), "feet_in_air": float((air_steps / (2 * n)).mean()),
-               "both_feet_up": float((both_up / n).mean()), "distance_m": float((q[:, 0] - x0)[alive].mean()) if bool(alive.any()) else float("nan"),
-               "trunk_drop_m": float((z0 - q[:, 2])[alive].mean()) if bool(alive.any()) else float("nan"),
+    up = bool(alive.any())
+    numbers = {"unload_max": float(unload_max.mean()), "stand_in_per_step": float((stand_sum / n).mean()),
+               "feet_in_air": float((air_steps / (2 * n)).mean()), "both_feet_up": float((both_up / n).mean()),
+               "distance_m": float((q[:, 0] - x0)[alive].mean()) if up else float("nan"),
+               "trunk_drop_m": float((z0 - q[:, 2])[alive].mean()) if up else float("nan"),
                "tilt_deg": math.degrees(float(tilt_max.mean())), "longest_unloaded_s": float(clock_max.max()),
                "fell": int((~alive).sum())}
-    return J, numbers, loads
+    return numbers, loads
 
 
 def lift(args) -> dict:
+    from types import SimpleNamespace
+
+    from mbrl.grad.train import window
+
     vx = 0.3 if args.vx is None else args.vx
+    wargs = SimpleNamespace(steps=args.steps, clip=1e9, action_noise=0.0, gamma=args.gamma,
+                            terminal_seconds=args.terminal_seconds, terminal_kinetic=0.0, fall_weight=1.0)
     results = {}
     for w in args.weights:
         env = GradWalk(args.robots, seed=args.seed, command=(vx, 0.0, 0.0), joint_noise=args.joint_noise,
@@ -202,18 +217,22 @@ def lift(args) -> dict:
         gen = torch.Generator().manual_seed(args.seed)
         actions = (args.init_noise * torch.randn(args.steps, env.B, NA, generator=gen, dtype=env.dtype)).requires_grad_(True)
         opt = torch.optim.Adam([actions], lr=args.lr)
-        t0, first, numbers, loads = time.time(), None, None, None
+        t0, first, numbers, loads, objective = time.time(), None, None, None, float("nan")
         for it in range(args.iterations + 1):
-            J, numbers, loads = rollout(env, start, actions, args)
-            first = first or numbers
             if it % args.print_every == 0 or it == args.iterations:
-                print(f"[lift] weight {w:g}  it {it:3d}  objective {numbers['objective']:+.4f}  weight off a foot "
+                numbers, loads = measure(env, start, actions.detach(), args)
+                numbers["objective"] = objective                  # of the actions before the last Adam step
+                first = first or numbers
+                print(f"[lift] weight {w:g}  it {it:3d}  objective {objective:+.4f}  weight off a foot "
                       f"{numbers['unload_max']:.2f}  feet in the air {numbers['feet_in_air']:.0%}  both up "
                       f"{numbers['both_feet_up']:.0%}  trunk +{numbers['distance_m']:.3f} m  drop {numbers['trunk_drop_m']:+.3f} m  "
                       f"tilt {numbers['tilt_deg']:.1f} deg  fell {numbers['fell']}  ({time.time() - t0:.0f} s)", flush=True)
-            if it < args.iterations:
+            if it < args.iterations:                         # the learner's window: objective and its derivative
+                env.set_state({k: v.clone() for k, v in start.items()})
+                out = window(env, OpenLoop(actions.detach()), wargs)
+                objective = out["stats"]["objective"]
                 opt.zero_grad()
-                (-J).backward()
+                actions.grad = -out["g"].to(actions.dtype)   # Adam goes down: minus d(objective)/d(action)
                 opt.step()
         results[f"{w:g}"] = {"first": first, "last": numbers, "loads_robot0": loads, "seconds": time.time() - t0}
     print("\n[lift] after the optimisation, per weight of the stand-in (0 = Eric's terms only, as in W5):")
