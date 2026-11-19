@@ -10,8 +10,11 @@ control step by name (plant, firmware, buffers, the task's memory), so a step ca
 backward pass, and the split of the reward into the terms that have a derivative and the ones that only count.
 
 step() returns the reward of the terms with a derivative (what is differentiated); the full reward, as PPO and the
-planner get it, is in the info.  The counting terms (rl/walk/task.py COUNTS: air_time, terminated) reach a gradient
-learner only through a learned value (roadmap W3).
+planner get it, is in the info.  The counting terms (rl/walk/task.py COUNTS: air_time, terminated) have no derivative.
+`terminated` reaches the learner as the fall charge (train.py).  `air_time` reached it in no way in W5 (the learned
+term 2 neither learns it nor can express it), and the robots stood instead of stepping; `air_time_smooth=w` adds its
+smooth stand-in (rl/walk/task.py STAND_INS: the weight a foot has taken off the ground) with weight w to what is
+differentiated (W5b).  The logged full reward stays Eric's terms.
 """
 
 from __future__ import annotations
@@ -26,7 +29,7 @@ from ph_k1 import firmware as fwm
 from ph_k1.plant import Ledger
 from rl.kick.contract import yaw_of
 from rl.walk import contract as C
-from rl.walk.task import COUNTS, FLOAT_MEMORY, REWARDS, WalkParams, WalkTask
+from rl.walk.task import COUNTS, FLOAT_MEMORY, REWARDS, STAND_INS, WalkParams, WalkTask
 
 NA = C.NJ
 OBS_NOISE = {"gyro": 0.2, "gravity": 0.05, "joint_pos": 0.01, "joint_vel": 1.5}     # rl/walk/env.py WalkConfig
@@ -55,18 +58,21 @@ class GradWalk(GradEnv):
                  delay_ms=(20.0, 20.0), gain_scale=(1.0, 1.0), encoder_bias: float = 0.0, random_yaw: bool = False,
                  command=None, command_scale: float = 1.0, top_speed: float | None = None,
                  rewards: dict | None = None, params: WalkParams | None = None, observe_target: bool = False,
-                 action_clip: float = 20.0):
+                 action_clip: float = 20.0, air_time_smooth: float = 0.0):
         self.joint_noise, self.random_yaw, self.observe_target = joint_noise, random_yaw, observe_target
         self.action_clip = action_clip          # rl/walk/env.py WalkConfig.action_clip: stops a runaway policy
         self.obs_noise, self.push_dv, self.push_interval_s = obs_noise or {}, push_dv, push_interval_s
         self.gain_scale, self.bias_range, self.command = gain_scale, encoder_bias, command
         self._build(robots, seed, device, dtype, C.GAINS, C.SLEW, delay_ms)
+        if air_time_smooth > 0:                 # air_time's smooth stand-in, differentiated beside Eric's terms (W5b)
+            rewards = {**(REWARDS if rewards is None else rewards), "air_time_smooth": air_time_smooth}
         self.task = WalkTask(self.model, POLICY_DT, params, rewards)
         self.task.command_scale = command_scale
         if top_speed is not None:
             self.task.top_speed = top_speed
         self.contract = self.task.contract
         self.smooth = tuple(k for k in self.task.rewards if k not in COUNTS)       # the terms with a derivative
+        self.full = tuple(k for k in self.task.rewards if k not in STAND_INS)      # the full reward: Eric's terms
         self.plant.reset(pose=self.contract.home)
         self.fw = fwm.K1Firmware(self.plant, self.fw_cfg)
         self.base_kp, self.base_kd = (g.clone() for g in fwm.gains(self.model, C.GAINS))
@@ -218,7 +224,7 @@ class GradWalk(GradEnv):
             log = {"copper_W": led.copper.detach() / POLICY_DT, "supplied_W": supplied_w.detach(),
                    "gearbox_W": led.gearbox.detach() / POLICY_DT, "contact_W": led.contact.detach() / POLICY_DT,
                    "stops_W": led.stops.detach() / POLICY_DT,
-                   "reward_all": self.task.reward(terms).detach(), "terminated": terminated,
+                   "reward_all": self.task.reward(terms, only=self.full).detach(), "terminated": terminated,
                    "speed_error": torch.linalg.vector_norm(self.mem["target"][:, :2] - track[:, :2], dim=1),
                    "requested": torch.linalg.vector_norm(self.mem["target"][:, :2], dim=1),
                    # does it step or shuffle: the share of feet in the air, and how fast the feet on the floor slide

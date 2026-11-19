@@ -59,6 +59,73 @@ def test_step_returns_the_terms_with_a_derivative():
     assert float(env.terminal_cost().min()) >= 0.0 and not bool(env.fallen().any())
 
 
+def test_air_time_stand_in_pays_for_the_weight_taken_off_a_foot():
+    """air_time's smooth stand-in (W5b) on chosen ground forces, foot clocks and requests."""
+    import dataclasses
+
+    env = GradWalk(7, seed=1, command=COMMAND, air_time_smooth=0.1)
+    env.step(torch.zeros(7, NA, dtype=torch.float64))
+    half, f64 = env.task.half_weight, torch.float64
+    assert 90.0 < half < 105.0                                           # 19.7 kg on two feet
+    force = torch.zeros(7, 2, 3, dtype=f64)
+    force[0, :, 2] = half                                                # both feet carry their half
+    force[1, 0, 2] = 2 * half                                            # all on the left, the right foot is up
+    force[2, :, 2] = 0.5 * half                                          # each foot carries a quarter (pushing off)
+    force[3, 0, 2] = 2 * half                                            # the right foot has been up for 0.6 s
+    force[4, 0, 2] = 2 * half                                            # as robot 1, but asked for 0.1 m/s only
+    force[5, 0, 2], force[5, 1, 2] = 1.5 * half, 0.5 * half              # three quarters of the weight on the left
+    force[6, 0, 2] = 2 * half                                            # the right foot rests on the floor without
+    contact = torch.tensor([[True, True], [True, False], [True, True], [True, False], [True, False], [True, True],
+                            [True, True]])                               # weight for 0.6 s: standing on one leg
+    sig = dataclasses.replace(env.sig, contact_force=force, contact=contact)
+    mem = dict(env.mem)
+    mem["air_time"] = torch.tensor([[0, 0], [0, 0.1], [0, 0], [0, 0.6], [0, 0.1], [0, 0], [0, 0]], dtype=f64)
+    mem["unloaded_time"] = torch.tensor([[0, 0], [0, 0.1], [0, 0], [0, 0.6], [0, 0.1], [0, 0], [0, 0.6]], dtype=f64)
+    mem["target"] = torch.tensor([COMMAND] * 4 + [(0.1, 0.0, 0.0)] + [COMMAND] * 2, dtype=f64)
+    z = torch.zeros(7, NA, dtype=f64)
+    terms, new = env.task.terms(sig, mem, z, z, z, torch.zeros(7, dtype=f64), torch.zeros(7, dtype=torch.bool))
+    assert torch.allclose(terms["air_time_smooth"], torch.tensor([0.0, 1.0, 1.0, 0.0, 0.0, 0.5, 0.0], dtype=f64))
+    assert terms["air_time"][1] == 1.0 and terms["air_time"][3] == 0.0   # where Eric's count pays and where it stopped
+    assert float(new["unloaded_time"][0].abs().max()) == 0.0             # a loaded foot starts the clock again
+    assert float(new["unloaded_time"][6, 1]) == pytest.approx(0.62)      # the resting foot's clock runs on
+
+
+def test_air_time_stand_in_gives_a_slope_through_the_plant():
+    """With the stand-in, the differentiated reward of a standing robot asked to walk gets a new slope, and autograd
+    through the pH plant agrees with finite differences."""
+    start, K = None, 3
+    grads = []
+    for weight in (0.0, 0.1):
+        env = GradWalk(2, seed=1, command=COMMAND, air_time_smooth=weight)
+        with torch.no_grad():
+            for _ in range(12):                                          # 0.24 s: settled, the request ramped past 0.2
+                env.between_steps()
+                env.step(torch.zeros(2, NA, dtype=torch.float64))
+        start = {k: v.clone() for k, v in env.get_state().items()}
+
+        def rollout(actions):
+            env.set_state({k: v.clone() for k, v in start.items()})
+            total = 0.0
+            for a in actions:
+                reward, _ = env.step(a)
+                total = total + reward.sum()
+            return total
+
+        actions = (0.05 * torch.randn(K, 2, NA, dtype=torch.float64, generator=torch.Generator().manual_seed(5)))
+        actions.requires_grad_(True)
+        (g,) = torch.autograd.grad(rollout(actions), actions)
+        grads.append(g)
+    assert float((grads[1] - grads[0]).abs().max()) > 1e-6               # the stand-in adds a slope
+    flat, eps = grads[1].flatten(), 1e-6
+    with torch.no_grad():
+        for j in flat.abs().topk(4).indices.tolist():                    # autograd against central differences
+            d = torch.zeros_like(flat)
+            d[j] = eps
+            d = d.reshape(actions.shape)
+            fd = float((rollout(actions.detach() + d) - rollout(actions.detach() - d)) / (2 * eps))
+            assert fd == pytest.approx(float(flat[j]), rel=1e-4, abs=1e-9)
+
+
 def test_restarts_draw_new_requests_and_a_fixed_command_stays():
     env = GradWalk(6, seed=2, joint_noise=0.1, random_yaw=True)
     env.between_steps()                                      # the first step of all: no time has passed yet

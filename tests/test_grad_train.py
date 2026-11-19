@@ -107,6 +107,35 @@ def test_the_curriculum_survives_a_resume(monkeypatch, tmp_path):
     assert torch.load(tmp_path / "b" / "model_2.pt", weights_only=False)["infos"]["command_scale"] == 0.6
 
 
+def test_walking_is_unchanged_without_the_stand_in(monkeypatch, tmp_path):
+    """The numbers of 2 updates of walking (3 robots, window 3, seed 3), recorded with the trainer of W5 (19 Nov 2026,
+    commit 7b0e185): --air-time-smooth 0 (the default) repeats W5."""
+    run_main(monkeypatch, tmp_path, "--task", "walk", "--robots", "3", "--steps", "3", "--iterations", "2",
+             "--eval-robots", "0", "--seed", "3", "--run-name", "w")
+    rows = [json.loads(line) for line in (tmp_path / "w" / "metrics.jsonl").read_text().splitlines()]
+    then = [{"Grad/objective": -6.4849755716350375, "Grad/reward_step": 0.06700101111079484,
+             "Grad/grad_median": 0.0024311897838706557, "Grad/term2": 6.88934815457732,
+             "Learn/fit_loss": 0.0012589806253545384, "Value/s_upright": 0.9878562186811501},
+            {"Grad/objective": -7.17464438297427, "Grad/reward_step": 0.03676427431113029,
+             "Grad/grad_median": 0.23264803137648318, "Grad/term2": 7.506955932462065,
+             "Learn/fit_loss": 0.001274506759290844, "Value/s_upright": 0.9358444073241114}]
+    for row, want in zip(rows, then):
+        for k, v in want.items():
+            assert row[k] == pytest.approx(v, rel=1e-9, abs=1e-15), k
+    assert "Reward/air_time_smooth" not in rows[0]
+
+
+def test_the_stand_in_reaches_the_learner(monkeypatch, tmp_path):
+    """--air-time-smooth w: the stand-in is differentiated and logged; the full reward stays Eric's terms."""
+    run_main(monkeypatch, tmp_path, "--task", "walk", "--robots", "3", "--steps", "3", "--iterations", "1",
+             "--eval-robots", "0", "--air-time-smooth", "0.1", "--run-name", "a")
+    assert json.loads((tmp_path / "a" / "config.json").read_text())["air_time_smooth"] == 0.1
+    r = json.loads((tmp_path / "a" / "metrics.jsonl").read_text().splitlines()[0])
+    assert np.isfinite(r["Reward/air_time_smooth"])
+    assert r["Reward/(differentiated)"] == pytest.approx(sum(r[f"Reward/{k}"] for k in train_terms())
+                                                         + r["Reward/air_time_smooth"], rel=1e-6)
+
+
 def test_standing_is_unchanged_by_walking(monkeypatch, tmp_path):
     """The numbers of 2 updates of standing (4 robots, window 4, seed 3, learned term-2 weights), recorded with the
     trainer as it was before walking was added (19 Nov 2026, commit e91df64)."""
