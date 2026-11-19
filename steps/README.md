@@ -8,6 +8,7 @@ One script per step of the roadmap in `docs/EXPERIMENTS.md`. "Repeat W0" means: 
     steps/W1.sh launch 2                   show the Kaggle launch for training seed 2 (add --yes to start it)
     steps/W2.sh                            the checks of the walk task
     steps/W3.sh check | laptop | launch    the learned term 2: tests, a 40 min laptop run, the Kaggle comparison run
+    steps/W5.sh check | laptop | launch    walking: tests, a 30 min smoke run, the Kaggle run; then fetch, score
 
 | Step | Question | Runs on | Result |
 |---|---|---|---|
@@ -15,6 +16,8 @@ One script per step of the roadmap in `docs/EXPERIMENTS.md`. "Repeat W0" means: 
 | W1 | Does the professor's formula learn to stand from scratch? | Kaggle 6 h per seed, scoring on the laptop 8 min | seed 1: 1.0 % falls, 2.3 W at 1.64 M steps; seeds 2 and 3 open |
 | W2 | Is the walk task the same on both plants, and is the derivative right while walking? | laptop, 25 min | yes: every reward term within 1e-5 on both plants; derivative within 6e-7 over 1 s of walking (8 foot events), no blow-up |
 | W3 | Can a learned term 2 replace the fixed one, and is standing as good with it? | laptop 50 min; Kaggle 6 h | yes, with learned weights (a free value network failed): Kaggle 0.5 % falls / 2.4 W at 0.82 M steps, against the fixed term 2's 1.0 % / 2.3 W at 1.64 M; stands straighter; the weights keep growing over a run (3.5 W at the end) |
+| W4 | Speed for walking | moved after W5: a walking window costs about as much as a standing one | open |
+| W5 | Does the professor's formula learn to walk from scratch? | laptop 30 min (smoke run); Kaggle 6 h | open |
 
 ## What a step script does
 

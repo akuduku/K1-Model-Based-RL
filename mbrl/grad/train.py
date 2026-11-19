@@ -1,4 +1,4 @@
-r"""Learn to stand from scratch with the professor's formula: derivatives of the cost through the pH model.
+r"""Learn to stand or to walk from scratch with the professor's formula: derivatives of the cost through the pH model.
 
     minimise over the network's weights w:   L = sum of the running cost (term 1) + cost at the window's end (term 2)
     where the state follows the pH model and the input comes from the controller (network + PD driver).
@@ -20,9 +20,16 @@ The world is the one of the other rows of the thesis table: sensor noise, pushes
 (`--quiet` switches them off).  The policy is scored on the fast C++ plant with Full Body's rl/stand/evaluate.py,
 the same evaluation as PPO and the planner.  Nothing is taken from another policy: the network starts random.
 
+--task walk (roadmap W5): Full Body's rl/walk task on mbrl/grad/walk_env.py (Eric's rewards and velocity requests,
+the firmware's sprint agent 75 -> 22, the world of rl/walk/env.py), term 2 with learned weights by default.  A
+curriculum multiplies every request by --command-scale (0.25 at the start: forward up to 0.5 m/s) and takes one step
+up when the robots rarely fall and follow the requests (next_command_scale), up to Eric's ranges.  In-run
+evaluation: rl/walk/evaluate.py WalkEval, six fixed commands on the C++ plant.
+
     python -m mbrl.grad.train --robots 8 --steps 20 --minutes 30 --no-wandb                       # laptop
     python -m mbrl.grad.train --robots 256 --steps 20 --device cuda --dtype float32 --hours 6     # a T4
-    python -m mbrl.grad.train --robots 16 --minutes 40 --term2 value --no-wandb                   # W3, laptop
+    python -m mbrl.grad.train --robots 16 --minutes 40 --term2 weights --no-wandb                 # W3, laptop
+    python -m mbrl.grad.train --task walk --robots 16 --minutes 30 --no-wandb                     # W5, laptop
 
 Writes <log-root>/<run-name>/model_<it>.pt (rsl-rl's layout), deploy_<it>.bin (the firmware's file), metrics.jsonl.
 """
@@ -71,6 +78,7 @@ def window(env: GradStand, policy: MLP, args, alive_age: torch.Tensor | None = N
     returns the critic's inputs and the TD(lambda) targets of V (full reward, falls charged as in the objective)."""
     B, K, dev = env.B, args.steps, env.device
     crits, full_rewards = [], []
+    walk_stats = {"speed_error": [], "requested_speed": [], "feet_air": [], "slip_speed": []}   # walking only
     t_start = time.time()
     env.detach()
     states, noises, epss, pushes, lives, falls, discs = [], [], [], [], [], [], []
@@ -94,6 +102,11 @@ def window(env: GradStand, policy: MLP, args, alive_age: torch.Tensor | None = N
             objective += disc * float((r * live).mean())
             reward_sum += float((r * live).sum())
             watts.append(float((info["copper_W"] * live).sum() / live.sum().clamp_min(1.0)))
+            if "speed_error" in info:   # walking: how well it follows the requests, and whether it steps
+                for k, key in (("speed_error", "speed_error"), ("requested_speed", "requested"),
+                               ("feet_air", "feet_air"), ("slip_speed", "slip_speed")):
+                    if info.get(key) is not None:
+                        walk_stats[k].append(float((info[key] * live).sum() / live.sum().clamp_min(1.0)))
             fallen = env.fallen() & alive
             fall_cost = torch.zeros_like(r)
             if bool(fallen.any()):      # the end state of a fall is far from x_T: term 2, charged now
@@ -161,7 +174,8 @@ def window(env: GradStand, policy: MLP, args, alive_age: torch.Tensor | None = N
                       "grad_max_over_median": float(norms.max() / norms.median().clamp_min(1e-30)),
                       "clipped": float((norms >= 0.999 * args.clip * norms.median(dim=1, keepdim=True).values).float().mean()),
                       "fell": float(fell_now.float().mean()), "objective": objective,
-                      "seconds_forward": t_forward, "seconds_backward": time.time() - t_start - t_forward}}
+                      "seconds_forward": t_forward, "seconds_backward": time.time() - t_start - t_forward,
+                      **{k: sum(v) / len(v) for k, v in walk_stats.items() if v}}}
 
 
 def window_one_graph(env: GradStand, policy: MLP, args, value=None, value_weight: float = 1.0) -> torch.Tensor:
@@ -198,8 +212,25 @@ def window_one_graph(env: GradStand, policy: MLP, args, value=None, value_weight
     return torch.stack(grads[::-1])
 
 
+def next_command_scale(scale: float, recent: list, args) -> float:
+    """The walking curriculum (W5): every request is multiplied by `scale` (WalkTask.command_scale).  One step up
+    (args.command_scale_step, at most args.command_scale_max) when, over the last args.curriculum_updates updates,
+    at most args.curriculum_falls of the robot-windows ended in a fall and the speed error was at most
+    args.curriculum_error x the requested speed.  recent: (share of robots fallen, speed error, requested speed) per
+    update.  It never goes down."""
+    if scale >= args.command_scale_max or len(recent) < args.curriculum_updates:
+        return scale
+    n = len(recent)
+    falls, error, requested = (sum(r[i] for r in recent) / n for i in range(3))
+    if falls <= args.curriculum_falls and error <= args.curriculum_error * requested:
+        return min(args.command_scale_max, round(scale + args.command_scale_step, 6))
+    return scale
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--task", choices=("stand", "walk"), default="stand",
+                    help="stand (W1, W3) or walk (W5: rl/walk's task, the firmware's sprint agent, a curriculum)")
     ap.add_argument("--run-name", default="grad-stand")
     ap.add_argument("--robots", type=int, default=8, help="0 = as many as fit: measured on the GPU at the start")
     ap.add_argument("--max-robots", type=int, default=1024, help="upper bound for --robots 0")
@@ -215,9 +246,9 @@ def main():
     ap.add_argument("--terminal-seconds", type=float, default=1.0, help="term 2: pose, tilt, height error charged this long")
     ap.add_argument("--terminal-kinetic", type=float, default=1.0, help="term 2: cost per joule of kinetic energy")
     ap.add_argument("--fall-weight", type=float, default=1.0, help="term 2 at the moment of a fall, times this")
-    ap.add_argument("--term2", choices=("fixed", "weights", "value"), default="fixed",
+    ap.add_argument("--term2", choices=("fixed", "weights", "value"), default=None,
                     help="term 2 at the window's end: the fixed goal state; its weights learned (W3); a learned "
-                         "value network V (W3, failed on the laptop)")
+                         "value network V (W3, failed on the laptop).  Default: fixed for stand, weights for walk")
     ap.add_argument("--weights-lr", type=float, default=1e-2, help="--term2 weights: Adam's step on the weights")
     ap.add_argument("--lam", type=float, default=0.95, help="TD(lambda) of the value's targets")
     ap.add_argument("--value-lr", type=float, default=5e-4)
@@ -232,7 +263,17 @@ def main():
     ap.add_argument("--value-hidden", default="128,128", help="V's hidden layers")
     ap.add_argument("--value-reward", choices=("smooth", "full"), default="smooth",
                     help="what V learns: the differentiated objective (smooth terms + fall charge), or the full reward")
-    ap.add_argument("--episode-s", type=float, default=10.0, help="robots start again after this long")
+    ap.add_argument("--episode-s", type=float, default=None,
+                    help="robots start again after this long (default: 10 s stand, 20 s walk as rl/walk/env.py)")
+    ap.add_argument("--command-scale", type=float, default=0.25,
+                    help="walk: every request x this at the start (0.25: forward up to 0.5 m/s; 1 = Eric's ranges)")
+    ap.add_argument("--command-scale-max", type=float, default=1.0, help="walk: where the curriculum stops")
+    ap.add_argument("--command-scale-step", type=float, default=0.05, help="walk: one step of the curriculum")
+    ap.add_argument("--curriculum-updates", type=int, default=20, help="walk: updates the curriculum looks back over")
+    ap.add_argument("--curriculum-falls", type=float, default=0.002,
+                    help="walk: one step up only if at most this share of robot-windows ended in a fall")
+    ap.add_argument("--curriculum-error", type=float, default=0.3,
+                    help="walk: ... and the speed error was at most this x the requested speed")
     ap.add_argument("--quiet", action="store_true", help="no sensor noise, no pushes, 20 ms delay")
     ap.add_argument("--iterations", type=int, default=1_000_000)
     ap.add_argument("--minutes", type=float, default=0.0)
@@ -252,6 +293,11 @@ def main():
     ap.add_argument("--fake-oom", action="store_true", help=argparse.SUPPRESS)   # test of the out-of-memory path
     ap.add_argument("--wandb-entity", default=os.environ.get("WANDB_ENTITY", "karl-jahnel-universit-t-leipzig"))
     args = ap.parse_args()
+    walk = args.task == "walk"
+    if args.term2 is None:
+        args.term2 = "weights" if walk else "fixed"
+    if args.episode_s is None:
+        args.episode_s = 20.0 if walk else 10.0
     if args.threads:
         torch.set_num_threads(args.threads)
     torch.manual_seed(args.seed)
@@ -260,9 +306,23 @@ def main():
     run_dir.mkdir(parents=True, exist_ok=True)
     (run_dir / "config.json").write_text(json.dumps(vars(args), indent=1))
 
-    world = {} if args.quiet else {"obs_noise": OBS_NOISE, "push_dv": 0.3, "delay_ms": (10.0, 70.0)}
+    curriculum = {"scale": args.command_scale, "recent": []}     # walk: what the requests are multiplied by
+    if walk:   # the world of rl/walk/env.py WalkConfig, where the walk is scored
+        from mbrl.grad.walk_env import OBS_NOISE as WALK_OBS_NOISE
+        from mbrl.grad.walk_env import GradWalk
+        from rl.walk import contract as WC
+        world = {} if args.quiet else {"obs_noise": WALK_OBS_NOISE, "push_dv": 0.5, "delay_ms": (10.0, 70.0),
+                                       "gain_scale": (0.6, 1.3), "encoder_bias": 0.015, "joint_noise": 0.1,
+                                       "random_yaw": True}
+        obs_dim, critic_dim = WC.OBS_DIM, WC.OBS_DIM + 15
+    else:
+        world = {} if args.quiet else {"obs_noise": OBS_NOISE, "push_dv": 0.3, "delay_ms": (10.0, 70.0)}
+        obs_dim, critic_dim = C.OBS_DIM, C.OBS_DIM + 6
 
-    def make_env(robots: int) -> GradStand:
+    def make_env(robots: int):
+        if walk:
+            return GradWalk(robots, seed=args.seed, device=args.device, dtype=dtype, command_scale=curriculum["scale"],
+                            **world)
         return GradStand(robots, seed=args.seed, device=args.device, dtype=dtype, **world)
 
     if args.robots <= 0:      # measure one short window with 64 robots, then take what fits in 60 % of the GPU
@@ -271,7 +331,7 @@ def main():
             probe = make_env(64)
             torch.cuda.synchronize()
             torch.cuda.reset_peak_memory_stats()
-            window(probe, MLP(C.OBS_DIM, NA, last_scale=0.01).to(device=args.device, dtype=dtype),
+            window(probe, MLP(obs_dim, NA, last_scale=0.01).to(device=args.device, dtype=dtype),
                    argparse.Namespace(**{**vars(args), "steps": 2}))
             torch.cuda.synchronize()
             per_robot = torch.cuda.max_memory_allocated() / 64
@@ -283,8 +343,8 @@ def main():
             print(f"[grad] {per_robot / 2**20:.1f} MiB per robot measured, GPU {total / 2**30:.1f} GiB: "
                   f"{args.robots} robots", flush=True)
     env = make_env(args.robots)
-    policy = MLP(C.OBS_DIM, NA, last_scale=0.01).to(device=args.device, dtype=dtype)
-    value = MLP(C.OBS_DIM + 6, 1)       # with --term2 fixed not used; kept in the file so the layout is rsl-rl's
+    policy = MLP(obs_dim, NA, last_scale=0.01).to(device=args.device, dtype=dtype)
+    value = MLP(critic_dim, 1)          # with --term2 fixed not used; kept in the file so the layout is rsl-rl's
     learner_v = None
     if args.value_start is None:
         args.value_start = 20 if args.term2 == "value" else 0
@@ -310,10 +370,18 @@ def main():
         iteration, env_steps = int(ck.get("iter", 0)), int(ck.get("infos", {}).get("executed_steps", 0))
         if learner_v is not None and "value_learner" in ck:
             learner_v.load_state_dict(ck["value_learner"])
+        if walk:                        # the curriculum goes on where it was
+            curriculum["scale"] = float(ck.get("infos", {}).get("command_scale", curriculum["scale"]))
+            env.task.command_scale = curriculum["scale"]
         print(f"[grad] continuing at iteration {iteration}", flush=True)
 
     evaluate = None
-    if args.eval_robots > 0:
+    if args.eval_robots > 0 and walk:   # the six fixed commands, under the training's conditions
+        from rl.walk.env import WalkConfig
+        from rl.walk.evaluate import WalkEval
+        evaluate = WalkEval(WalkConfig(num_envs=args.eval_robots, device=args.eval_device, dtype="float32", seed=args.seed),
+                            args.eval_robots, device=args.eval_device)
+    elif args.eval_robots > 0:
         from rl.stand.env import StandConfig
         from rl.stand.evaluate import StandEval
         evaluate = StandEval(StandConfig(num_envs=args.eval_robots, device=args.eval_device, dtype="float32", seed=args.seed),
@@ -322,7 +390,7 @@ def main():
     if not args.no_wandb:
         import wandb
         run = wandb.init(project=args.wandb_project, entity=args.wandb_entity, name=args.run_name,
-                         config={"task": "stand", "method": "gradients through the pH model", **vars(args)})
+                         config={"method": "gradients through the pH model", **vars(args)})
     print(f"[grad] term 2 at the window's end: {dict(fixed='fixed goal state', weights='learned weights (W3)', value='learned value network V (W3)')[args.term2]}",
           flush=True)
 
@@ -332,10 +400,15 @@ def main():
             return policy(x.to(device=args.device, dtype=dtype)).to(device=x.device, dtype=x.dtype)
 
     def save() -> Path:
-        from rl.stand.export import export_bin
+        if walk:
+            from rl.walk.export import export_bin       # the firmware's sprint agent, 75 -> 22
+        else:
+            from rl.stand.export import export_bin      # the firmware's stand agent, 72 -> 22
         state = {k: (v.detach().cpu().float() if v.is_floating_point() else v.detach().cpu())
                  for k, v in policy.state_dict().items()}
         ck = checkpoint(policy, value, iteration, {"executed_steps": env_steps, "method": "grad", "term2": args.term2})
+        if walk:
+            ck["infos"].update(task="walk", command_scale=curriculum["scale"])
         if args.term2 == "weights":
             ck["infos"]["term2_weights"] = dict(zip(learner_v.names, learner_v.s_target.tolist()))
         ck["actor_state_dict"] = state
@@ -349,8 +422,10 @@ def main():
             print(f"[export] failed: {type(exc).__name__}: {exc}", flush=True)
         return path
 
-    print(f"[grad] stand from scratch: {args.robots} robots x {args.steps} control steps per window on {args.device} "
-          f"({args.dtype}), world {'quiet' if args.quiet else 'with noise, pushes, delay'}, logs -> {run_dir}", flush=True)
+    print(f"[grad] {args.task} from scratch: {args.robots} robots x {args.steps} control steps per window on {args.device} "
+          f"({args.dtype}), world {'quiet' if args.quiet else 'with noise, pushes, delay'}, logs -> {run_dir}"
+          + (f"; requests x {curriculum['scale']:g} (curriculum up to {args.command_scale_max:g})" if walk else ""),
+          flush=True)
     stop = {"why": None}
     old = signal.signal(signal.SIGINT, lambda *_: stop.update(why="SIGINT"))
     budget = max(args.minutes, 60 * args.hours)
@@ -421,17 +496,31 @@ def main():
                     age[ids] = 0
                 iteration += 1
                 env_steps += args.robots * args.steps
+                walk_row = {}
+                if walk:                                           # the curriculum: one step up when it walks well
+                    s = w["stats"]
+                    curriculum["recent"] = (curriculum["recent"] + [(s["fell"], s["speed_error"], s["requested_speed"])]
+                                            )[-args.curriculum_updates:]
+                    new = next_command_scale(curriculum["scale"], curriculum["recent"], args)
+                    if new != curriculum["scale"]:
+                        print(f"[grad] curriculum: requests x {new:g} (was x {curriculum['scale']:g})", flush=True)
+                        curriculum["scale"], curriculum["recent"] = new, []
+                        env.task.command_scale = new
+                    walk_row = {"Curriculum/command_scale": curriculum["scale"]}
                 now = time.time()
                 row = {"iteration": iteration, "Cost/executed_steps": env_steps, "Cost/seconds": now - t_it,
-                       "Learn/fit_loss": float(loss), "Learn/delta": delta, **{f"Grad/{k}": v for k, v in w["stats"].items()},
-                       **value_row}
+                       "Learn/fit_loss": float(loss.detach()), "Learn/delta": delta, **{f"Grad/{k}": v for k, v in w["stats"].items()},
+                       **value_row, **walk_row}
+                evaluated = False
                 if evaluate is not None and args.eval_every_min > 0 and (now - last["eval"]) / 60 >= args.eval_every_min:
                     try:
                         row.update({k: float(v) for k, v in evaluate(act, iteration).items()})
+                        evaluated = True
                     except Exception as exc:  # noqa: BLE001  (an evaluation must never end a training)
                         print(f"[eval] failed: {type(exc).__name__}: {exc}", flush=True)
                     last["eval"] = time.time()
-                if args.save_every_min > 0 and (now - last["save"]) / 60 >= args.save_every_min:
+                # every evaluated update is saved too: the scoring picks among evaluated updates with a policy file
+                if evaluated or (args.save_every_min > 0 and (now - last["save"]) / 60 >= args.save_every_min):
                     save()
                     last["save"] = time.time()
                 metrics.write(json.dumps(row) + "\n")
@@ -447,7 +536,10 @@ def main():
                          f"expl.var {value_row['Value/explained_variance']:+.2f} weight {value_row['Value/weight']:.2f}"
                          if value_row else "")
                       + ("  s " + " ".join(f"{v:.2f}" for k, v in value_row.items() if k.startswith("Value/s_"))
-                         if args.term2 == "weights" else "") + extra,
+                         if args.term2 == "weights" else "")
+                      + (f"  speed err {s['speed_error']:.2f} of {s['requested_speed']:.2f} m/s  feet in air "
+                         f"{s['feet_air']:.0%}  slip {s['slip_speed']:.2f} m/s  requests x{curriculum['scale']:g}"
+                         if walk else "") + extra,
                       flush=True)
                 if budget > 0 and (time.time() - t0) / 60 > budget:
                     stop["why"] = f"time budget of {budget:g} min used up"
@@ -464,7 +556,7 @@ def main():
     path = save()
     print(f"[grad] {'stopped: ' + stop['why'] if stop['why'] else 'done'} after iteration {iteration} "
           f"({(time.time() - t0) / 60:.1f} min, {env_steps} steps, {falls} falls); {path.name}"
-          + "".join(f"  {k.split('/')[-1]} {v:.3g}" for k, v in final.items()), flush=True)
+          + "".join(f"  {k.split('/')[-1]} {v:.3g}" for k, v in final.items() if k.startswith("Eval/")), flush=True)
     if run is not None:
         run.finish()
 

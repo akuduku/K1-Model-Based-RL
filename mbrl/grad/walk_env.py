@@ -54,8 +54,10 @@ class GradWalk(GradEnv):
                  obs_noise: dict | None = None, push_dv: float = 0.0, push_interval_s=(1.5, 4.0),
                  delay_ms=(20.0, 20.0), gain_scale=(1.0, 1.0), encoder_bias: float = 0.0, random_yaw: bool = False,
                  command=None, command_scale: float = 1.0, top_speed: float | None = None,
-                 rewards: dict | None = None, params: WalkParams | None = None, observe_target: bool = False):
+                 rewards: dict | None = None, params: WalkParams | None = None, observe_target: bool = False,
+                 action_clip: float = 20.0):
         self.joint_noise, self.random_yaw, self.observe_target = joint_noise, random_yaw, observe_target
+        self.action_clip = action_clip          # rl/walk/env.py WalkConfig.action_clip: stops a runaway policy
         self.obs_noise, self.push_dv, self.push_interval_s = obs_noise or {}, push_dv, push_interval_s
         self.gain_scale, self.bias_range, self.command = gain_scale, encoder_bias, command
         self._build(robots, seed, device, dtype, C.GAINS, C.SLEW, delay_ms)
@@ -193,6 +195,7 @@ class GradWalk(GradEnv):
         """-> (reward (B,) of the terms with a derivative, dict of logged numbers).  Differentiable in a and in the
         state (FLOAT_STATE)."""
         pl, fw = self.plant, self.fw
+        a = a.clamp(-self.action_clip, self.action_clip)     # as rl/walk/env.py; the derivative is 0 beyond it
         fw.ring = fw.ring.clone()                       # policy_step writes the ring in place
         pl.ledger = Ledger.zeros(self.B, pl.dtype, pl.device)
         info = fw.policy_step(self.contract.decode(a), SUBSTEPS, kp=self.kp, kd=self.kd,
@@ -213,6 +216,10 @@ class GradWalk(GradEnv):
             log = {"copper_W": pl.ledger.copper.detach() / POLICY_DT, "supplied_W": supplied_w.detach(),
                    "reward_all": self.task.reward(terms).detach(), "terminated": terminated,
                    "speed_error": torch.linalg.vector_norm(self.mem["target"][:, :2] - track[:, :2], dim=1),
+                   "requested": torch.linalg.vector_norm(self.mem["target"][:, :2], dim=1),
+                   # does it step or shuffle: the share of feet in the air, and how fast the feet on the floor slide
+                   "feet_air": (self.mem["air_time"] > 0).to(self.dtype).mean(1),
+                   "slip_speed": terms["foot_slip"].detach().clamp_min(0.0).sqrt() if "foot_slip" in terms else None,
                    "terms": {k: (self.task.rewards[k] * POLICY_DT * v).detach() for k, v in terms.items()}}
         return reward, log
 

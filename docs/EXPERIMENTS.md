@@ -28,8 +28,9 @@ when a package is finished.
   straighter.  Open: the weights keep growing over a run and the power with them (3.5 W at the end).  Numbers: W3.
 - **Every step can be repeated by name:** `steps/W0.sh` ... `steps/W3.sh` (`steps/list.sh`, `steps/README.md`);
   each finished step has a git tag of the same name in both repositories.
-- **Next:** the user decides which term 2 W1's seeds 2 and 3 use (recommended: the learned weights), then W4
-  (speed) and W5 (train the walk).
+- **Next (decided 19 Nov):** W5, walking from scratch (`steps/W5.sh`; the trainer is built, the first Kaggle run
+  is the user's launch).  W4 (speed) moved after it: a walking window costs about as much as a standing one.  W1's
+  standing seeds 2 and 3 wait until the end (only Kaggle time, no code).
 - The planner (`mbrl/mpc`, packages 3-5 below) and PPO on pH are **comparison rows** now, not the thesis method.
 - Commands: tests `scripts/test_all.sh`; Kaggle runs are started by the user (`kaggle/run.sh`, commit and push
   first); Python: `~/Dokumente/Robotics/venv/bin/python`; on the laptop one gradient job at a time (7 GB of memory)
@@ -382,7 +383,7 @@ push and its result in this file.
 2.8e-8 (20 steps); gradient norm 9.3 and 14.2, the same size as in a quiet stand (6.8 and 17).  So one landing
 neither breaks nor blows up the derivative.  Not covered by this: repeated steps, sliding feet, the ball.
 
-### W1: standing, solid  (seed 1 done 17 Nov; seeds 2 and 3 open)
+### W1: standing, solid  (seed 1 done 17 Nov; seeds 2 and 3 at the end of the work, decided 19 Nov)
 - **`grad-stand-v1c`, fetched 17 Nov** (`outputs/kaggle/grad-stand-v1c/`).  The run sized itself to 1024 robots
   (8.1 MiB per robot measured), 156 updates of 20 480 environment steps in 5.6 h: 129 s per update (43 s forward,
   87 s backward), about 160 robot-steps per second.  No out-of-memory fallback.
@@ -589,20 +590,60 @@ neither breaks nor blows up the derivative.  Not covered by this: repeated steps
     not in term 2, so posture weighs more and more against it.  Falls do not change.  The checkpoint rule (best
     in-run evaluation) picks an early checkpoint, so standing's result does not suffer; the long walking runs (W5)
     need a limit on the weights or the energy in term 2.  Decide there, on walking's own numbers.
-- **Open, the user's decision:** which term 2 W1's seeds 2 and 3 use.  Recommended: the learned weights
-  (`--term2 weights`), the term 2 walking needs anyway, so that standing and walking are one method;
-  `grad-stand-weights` is then their seed 1, and `grad-stand-v1c` stays as the comparison row "term 2 written by
-  hand".
+- **Open, the user's decision, at the end (19 Nov: walking first):** which term 2 W1's seeds 2 and 3 use.
+  Recommended: the learned weights (`--term2 weights`), the term 2 walking needs anyway, so that standing and walking
+  are one method; `grad-stand-weights` is then their seed 1, and `grad-stand-v1c` stays as the comparison row "term
+  2 written by hand".
 
-### W4: speed for walking
+### W4: speed for walking  **Moved after W5 (19 Nov).**
+- Why moved: a walking window costs about as much as a standing one (19 Nov, laptop, 16 robots x 20 control steps,
+  one core: walking 28.9 s, standing 26.2 s; forward 7.0 / 6.8 s, backward 22.0 / 19.4 s).  So a 6 h Kaggle run gives
+  about 3 M walking steps, as many as standing had.  W4 comes when walking shows it needs more than that.
 - In the gradient plant only: the 8 sole contact points instead of 128 (most of the 14 MB per robot is contact
   data) and 2 ms plant steps.  Measure with `TASK=grad-bench kaggle/run.sh HOURS=1`.
 - Derivative code in the C++/CUDA plant (`Full Body/ph_k1_cuda/include/ph_k1/step.hpp`, about 800 lines to
   differentiate by hand and to test against the Python plant) only if walking is too slow after this.
 
-### W5: walk, then run
-- From scratch, commanded speeds growing over the run (stand, slow walk, faster).  Kaggle task `grad-walk` (copy of
-  `grad-stand` in `kaggle/train_mb.py`).  Rows to compare with: PPO on pH, the planner, the team's PPO in MuJoCo.
+### W5: walk, then run  Repeat: `steps/W5.sh check | laptop | launch | fetch | score`
+- **What:** walking from scratch with the thesis method: `python -m mbrl.grad.train --task walk` (Kaggle:
+  `TASK=grad-walk`).  The task of W2 (`Full Body/rl/walk/task.py`, Eric's rewards and requests) on the
+  differentiable plant (`mbrl/grad/walk_env.py`), in the world of the scoring environment (`rl/walk/env.py
+  WalkConfig`: sensor noise, pushes 0.5 m/s, delays 10-70 ms, gain errors 0.6-1.3, encoder bias, start-pose noise,
+  random heading, 20 s episodes).  The policy is the firmware's sprint agent (75 -> 22; the robot loads the same
+  `.bin` reader as for standing: `K1_Deploy/firmware/src/agents/sprint.cpp`, `policy_mlp.h`), from a random network.
+  Term 2: learned weights (W3), starting from the 14 state terms at 1 s each.
+- **Curriculum** (`train.py: next_command_scale`): every request x `command_scale`, 0.25 at the start (forward up
+  to 0.5 m/s, back 0.375, sideways 0.25 m/s, turns 0.5 rad/s); one step of 0.05 up when, over the last 20 updates, at
+  most 0.2 % of the robot-windows ended in a fall (about 1 robot in 10 per 20 s) and the speed error was at most 30 %
+  of the requested speed; up to 1 (Eric's ranges, sprints up to 2 m/s).  It never goes down; it is kept in the
+  checkpoint.  Running above 2 m/s (`top_speed`) is a later step.
+- **Logged every update:** speed error and requested speed, the curriculum's level, the share of feet in the air
+  and the sliding speed of the feet on the ground (steps or shuffles?).
+- **In-run evaluation** (`Full Body/rl/walk/evaluate.py WalkEval`, every 20 min, 64 robots on Kaggle): the six fixed
+  commands of W2 (stand, forward 0.5 and 1.0 m/s, back 0.5, sideways 0.5, turn 1 rad/s) with pushes and noise,
+  the same at every evaluation, whatever the curriculum asks.  Every evaluated update is saved.
+- **Scoring** (`python -m mbrl.grad.score <run>`, the task from the run's `config.json`): the checkpoint with the
+  fewest falls over the six commands, then the lowest speed error; per command 3 seeds x 128 robots on the pH plant
+  with pushes and noise, once quiet, and 20 s per command in MuJoCo, quiet and pushed.  Row for the table: falls over
+  all six commands; speed error, power and energy per metre at 0.5 m/s.
+- **Checks** (`steps/W5.sh check`): `tests/test_grad_train.py`: 2 updates of walking write the file the robot
+  loads (its forward pass = the network); the curriculum rises, stops at 1, never goes down, survives a resume;
+  standing gives the numbers of the trainer before W5 (bit-identical, recorded with commit `e91df64`).  Full Body
+  `rl/walk/tests`: the sprint file round trip; `WalkEval` reports every command.  `GradWalk` now clips actions at
+  +-20 as `WalkEnv` does.
+- **Done when (first run):** it walks 0.5 m/s on the pH plant with pushes (few falls, speed error at most
+  0.15 m/s), stands when asked, and walks 20 s in MuJoCo.  Comparison row: Eric's `walk_v9` (the team's PPO, MuJoCo;
+  W2): no falls on the six commands, speed error 0.05-0.10 m/s, 105 W at 0.5 m/s.  A failure (shuffling instead of
+  stepping: air time has no derivative; or falling) is reported as found and examined before anything is changed.
+- **Smoke run on the laptop (19 Nov, `steps/W5.sh laptop`: 16 robots, 30 min, one core, seed 1; not a result):**
+  everything runs end to end (training, curriculum, evaluation every 10 min, export, scoring).  61 updates, 19 520
+  steps.  In the six-command evaluation the robots stay up longer: 1.5 s on average at update 21, 2.5 s at 42,
+  3.5 s at 61 (nearly all still fall under pushes).  Scored once (update 42, 1 seed x 16 robots): it stands 20 s in
+  MuJoCo and on the quiet pH plant when asked to stand, but does not walk yet (speed 0 on "forward 0.5"); feet in
+  the air 1-3 % of the time (no steps yet), training falls 12-20 % of the robots per window, 40-55 W.  Harder than
+  standing at the start: the sprint's home pose tips over by itself within 1.6 s (standing's home pose stood), so the
+  network must learn to balance first.  The curriculum stayed at x 0.25.
+- Other rows to compare with later: PPO on pH, the planner.
 
 ### W6: kick
 - First the derivative through the ball contact (a check like W0).  The ball's 3x3 solve in the Python plant

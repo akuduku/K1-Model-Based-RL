@@ -25,6 +25,7 @@ kaggle/run.sh overrides the settings below:
     TASK=mb-stand kaggle/run.sh HOURS=6 RUN_NAME=mb-stand-v1  # the model-based learner (mbrl.mpc) on standing
     TASK=grad-bench kaggle/run.sh HOURS=1                     # speed of gradients through the pH plant (mbrl.grad.bench)
     TASK=grad-stand kaggle/run.sh HOURS=6 RUN_NAME=grad-stand-v1            # the professor's formula, from scratch
+    TASK=grad-walk kaggle/run.sh HOURS=6 RUN_NAME=grad-walk-v1              # the same, walking (W5: --task walk)
 
 The kick tasks: kick-plan runs `python -m mbrl.kick.plan` (CEM over the kick plan of mbrl/kick/controller.py, one
 search per ball speed in KICK_SPEEDS, through the walk policy WALK), kick-track runs `python -m mbrl.kick.train --plan
@@ -87,12 +88,12 @@ KICK_WANDB_PROJECT = "Akos pH Kick MBRL"
 MB_ROBOTS = 256                           # mb-*: world robots of the model-based learner (mbrl.mpc)
 MB_CANDIDATES = 8                         # mb-*: model copies per world robot
 MB_HORIZON = 5                            # mb-*: planner steps of 20 ms
-GRAD_ROBOTS = 0                           # grad-stand: robots of the gradient learner (mbrl.grad.train); 0 = as many as
-                                          # fit, measured on the GPU at the start
-GRAD_STEPS = 20                           # grad-stand: control steps per window
-GRAD_DEVICE = "cuda"                      # grad-stand: where the Python pH plant runs
+GRAD_ROBOTS = 0                           # grad-stand/-walk: robots of the gradient learner (mbrl.grad.train); 0 = as
+                                          # many as fit, measured on the GPU at the start
+GRAD_STEPS = 20                           # grad-stand/-walk: control steps per window
+GRAD_DEVICE = "cuda"                      # grad-stand/-walk: where the Python pH plant runs
 GRAD_BENCH_ROBOTS = "64,256,1024"         # grad-bench: robots per row
-GRAD_DTYPE = "float32"                    # grad-stand
+GRAD_DTYPE = "float32"                    # grad-stand/-walk
 MB_WANDB_PROJECT = "Akos pH MB"
 RESUME = ""                               # W&B run (name or id) in WANDB_PROJECT to continue from; "" = fresh
 SESSION_HOURS = 11.0                      # our own cap, 1 h under Kaggle's 12 h (kaggle/run.sh pushes with the same
@@ -109,7 +110,8 @@ TASK_DEFAULTS = {"stand": {"iterations": 3000, "video_every": 500, "video_every_
                  "kick-mbrl": {"iterations": 100000, "video_every": 0, "video_every_min": 30.0},
                  "mb-stand": {"iterations": 1000000, "video_every": 0, "video_every_min": 30.0},
                  "grad-bench": {"iterations": 0, "video_every": 0, "video_every_min": 0.0},
-                 "grad-stand": {"iterations": 1000000, "video_every": 0, "video_every_min": 0.0}}
+                 "grad-stand": {"iterations": 1000000, "video_every": 0, "video_every_min": 0.0},
+                 "grad-walk": {"iterations": 1000000, "video_every": 0, "video_every_min": 0.0}}
 REPO = "https://github.com/akuduku/K1-Model-Based-RL.git"
 WORK = Path("/kaggle/working")
 SRC = Path("/tmp/mbrl")
@@ -202,7 +204,7 @@ def main():
     LOGS.mkdir(parents=True, exist_ok=True)
     if TASK not in TASK_DEFAULTS:
         raise SystemExit(f"TASK={TASK!r}: stand, getup, getup-plan, getup-track, getup-mbrl, kick-plan, kick-track, "
-                         "kick-mbrl, mb-stand, grad-bench or grad-stand")
+                         "kick-mbrl, mb-stand, grad-bench, grad-stand or grad-walk")
     d = TASK_DEFAULTS[TASK]
     run_name = RUN_NAME or (f"{TASK}-v1" if TASK.startswith(("getup-", "kick-", "mb-", "grad-")) else f"{TASK}-mb-v1")
     project = KICK_WANDB_PROJECT if TASK.startswith("kick-") else WANDB_PROJECT
@@ -310,11 +312,14 @@ def main():
         # 64 robots 24 and 256 robots 38 robot-control-steps per second)
         go([py, "-u", "-m", "mbrl.grad.bench", "--devices", "cuda", "--robots", *str(GRAD_BENCH_ROBOTS).split(","),
             "--dtypes", "float32", "--steps", 20, "--trace"], "benchmark (GPU)")
-    elif TASK == "grad-stand":
-        # the professor's formula: standing from scratch with derivatives of the cost through the pH model
-        go([py, "-u", "-m", "mbrl.grad.train", "--run-name", run_name, "--robots", GRAD_ROBOTS, "--steps", GRAD_STEPS,
+    elif TASK in ("grad-stand", "grad-walk"):
+        # the professor's formula: standing (or walking, W5) from scratch with derivatives of the cost through the
+        # pH model; walking is evaluated on six fixed commands, 64 robots each
+        walk = TASK == "grad-walk"
+        go([py, "-u", "-m", "mbrl.grad.train", *(["--task", "walk"] if walk else []), "--run-name", run_name,
+            "--robots", GRAD_ROBOTS, "--steps", GRAD_STEPS,
             "--device", GRAD_DEVICE, "--dtype", GRAD_DTYPE, "--minutes", f"{max(budget, 1):.1f}", "--delta-final", 0.01,
-            "--save-every-min", SAVE_EVERY_MIN, "--eval-every-min", 20, "--eval-robots", 128,
+            "--save-every-min", SAVE_EVERY_MIN, "--eval-every-min", 20, "--eval-robots", 64 if walk else 128,
             "--log-root", WORK / "runs", "--wandb-project", MB_WANDB_PROJECT, "--wandb-entity", WANDB_ENTITY,
             *(["--resume", RESUME] if RESUME else []), *TRAIN_ARGS.split()], "training")
     elif TASK.startswith("mb-"):
