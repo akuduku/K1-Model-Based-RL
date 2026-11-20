@@ -10,7 +10,8 @@ One script per step of the roadmap in `docs/EXPERIMENTS.md`. "Repeat W0" means: 
     steps/W3.sh check | laptop | launch    the learned term 2: tests, a 40 min laptop run, the Kaggle comparison run
     steps/W5.sh check | laptop | launch    walking: tests, a 30 min smoke run, the Kaggle run; then fetch, score
     steps/W5b.sh check | gait | lift       air_time's smooth stand-in: tests, on a real gait, the learner's derivative
-    steps/W5b.sh laptop | launch           ... a 30 min smoke run, the Kaggle run (W=1.0 by default); then fetch, score
+                                           (WEIGHTS="1 2" ITERATIONS=100)
+    steps/W5b.sh laptop | launch           ... a 30 min smoke run (W=2, QUIET=1), the Kaggle run (W=1.0 by default)
 
 | Step | Question | Runs on | Result |
 |---|---|---|---|
@@ -20,7 +21,7 @@ One script per step of the roadmap in `docs/EXPERIMENTS.md`. "Repeat W0" means: 
 | W3 | Can a learned term 2 replace the fixed one, and is standing as good with it? | laptop 50 min; Kaggle 6 h | yes, with learned weights (a free value network failed): Kaggle 0.5 % falls / 2.4 W at 0.82 M steps, against the fixed term 2's 1.0 % / 2.3 W at 1.64 M; stands straighter; the weights keep growing over a run (3.5 W at the end) |
 | W4 | Speed for walking | moved after W5: a walking window costs about as much as a standing one | open |
 | W5 | Does the professor's formula learn to walk from scratch? | laptop 30 min (smoke run); Kaggle 6 h; scoring 15 min | no: no steps, 93 % falls over the six commands with pushes (78 % when asked to stand); quiet and in MuJoCo it stands but does not move.  Cause: `air_time` has no derivative (W5b) |
-| W5b | Does a smooth stand-in for `air_time` make the method step? | laptop: gait 1 min, lift 20-50 min, smoke run 30 min | not on its own: following it, weight comes off a foot (19 % without it, 79 % at weight 1), but first by rocking between the feet; the 30 min learner run did not change; Kaggle run open (the user's choice) |
+| W5b | Does a smooth stand-in for `air_time` make the method step? | laptop: gait 1 min, lift 20-55 min, smoke run 30 min | not yet: it gives the slope; paid only for unloading kept 0.06 s (Eric's minimum), the optimiser shifts the weight from foot to foot instead of rocking (86 % off a foot at weight 2), but no foot comes up, and 30 min learner runs do not change; no Kaggle run |
 
 ## What a step script does
 
