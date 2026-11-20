@@ -929,8 +929,8 @@ What the check of 20 Nov found, and what changed (`--start as-before` keeps the 
 - Window groups by what the robot did: still 140, walking (twist commanded) 134, no twist but legs moving 98 (on
   kick_walk: the walks to the ball, the two kicks, the stops).
 - Energy (`mbrl/energy_compare.py`; Full Body `rl/walk/backends.py`, `energy_book()`): booked at every 1 ms step on
-  both engines (pH from its ledger) instead of sampled once per 20 ms.  The samples missed 20-40 % of the battery
-  power.
+  both engines (pH from its ledger) instead of sampled once per 20 ms.  While walking, the booked battery power is
+  14-42 % above the samples (the samples read 13-30 % low).
 
 | kick_walk run, joint error [deg], median of the windows | nothing moves | MuJoCo | pH | pH - MuJoCo, mean (95 %) |
 |---|---|---|---|---|
