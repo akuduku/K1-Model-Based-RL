@@ -136,6 +136,22 @@ def test_the_stand_in_reaches_the_learner(monkeypatch, tmp_path):
                                                          + r["Reward/air_time_smooth"], rel=1e-6)
 
 
+def test_the_clock_reaches_the_learner(monkeypatch, tmp_path):
+    """--gait-clock w: 77 inputs (the clock after the 75), the clock's reward differentiated and logged; the full
+    reward stays Eric's terms."""
+    run_main(monkeypatch, tmp_path, "--task", "walk", "--robots", "3", "--steps", "3", "--iterations", "1",
+             "--eval-robots", "0", "--gait-clock", "1.0", "--run-name", "c")
+    assert json.loads((tmp_path / "c" / "config.json").read_text())["gait_clock"] == 1.0
+    r = json.loads((tmp_path / "c" / "metrics.jsonl").read_text().splitlines()[0])
+    assert np.isfinite(r["Reward/gait_clock"]) and r["Reward/gait_clock"] > 0
+    assert r["Reward/(differentiated)"] == pytest.approx(sum(r[f"Reward/{k}"] for k in train_terms())
+                                                         + r["Reward/gait_clock"], rel=1e-6)
+    import torch
+    actor = torch.load(tmp_path / "c" / "model_1.pt", map_location="cpu", weights_only=False)["actor_state_dict"]
+    first = next(v for k, v in actor.items() if k.endswith("weight"))
+    assert first.shape[1] == 77                                          # the network takes the clock
+
+
 def test_standing_is_unchanged_by_walking(monkeypatch, tmp_path):
     """The numbers of 2 updates of standing (4 robots, window 4, seed 3, learned term-2 weights), recorded with the
     trainer as it was before walking was added (19 Nov 2026, commit e91df64)."""

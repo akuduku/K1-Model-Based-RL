@@ -337,6 +337,9 @@ def main():
                     help="walk: one step up only if at most this share of robot-windows ended in a fall")
     ap.add_argument("--curriculum-error", type=float, default=0.3,
                     help="walk: ... and the speed error was at most this x the requested speed")
+    ap.add_argument("--gait-clock", type=float, default=0.0,
+                    help="walk: weight of the gait clock's reward (W5c; Full Body rl/walk/task.py gait_clock), and the clock's "
+                         "two inputs after the 75 (77 inputs, the firmware's walk_clock agent); 0 = off, as in W5")
     ap.add_argument("--air-time-smooth", type=float, default=0.0,
                     help="walk: weight of air_time's smooth stand-in (Full Body rl/walk/task.py STAND_INS: the weight a "
                          "foot has taken off the ground and kept off for 3 control steps), differentiated beside Eric's "
@@ -384,7 +387,8 @@ def main():
         world = {} if args.quiet else {"obs_noise": WALK_OBS_NOISE, "push_dv": 0.5, "delay_ms": (10.0, 70.0),
                                        "gain_scale": (0.6, 1.3), "encoder_bias": 0.015, "joint_noise": 0.1,
                                        "random_yaw": True}
-        obs_dim, critic_dim = WC.OBS_DIM, WC.OBS_DIM + 15
+        obs_dim = WC.OBS_DIM + (2 if args.gait_clock > 0 else 0)          # the clock: sin, cos after the 75
+        critic_dim = obs_dim + 15
     else:
         world = {} if args.quiet else {"obs_noise": OBS_NOISE, "push_dv": 0.3, "delay_ms": (10.0, 70.0)}
         obs_dim, critic_dim = C.OBS_DIM, C.OBS_DIM + 6
@@ -392,7 +396,7 @@ def main():
     def make_env(robots: int):
         if walk:
             return GradWalk(robots, seed=args.seed, device=args.device, dtype=dtype, command_scale=curriculum["scale"],
-                            air_time_smooth=args.air_time_smooth, **world)
+                            air_time_smooth=args.air_time_smooth, gait_clock=args.gait_clock, **world)
         return GradStand(robots, seed=args.seed, device=args.device, dtype=dtype, **world)
 
     if args.robots <= 0:      # measure one short window with 64 robots, then take what fits in 60 % of the GPU
@@ -463,6 +467,9 @@ def main():
                          config={"method": "gradients through the pH model", **vars(args)})
     print(f"[grad] term 2 at the window's end: {dict(fixed='fixed goal state', weights='learned weights (W3)', value='learned value network V (W3)')[args.term2]}",
           flush=True)
+    if walk and args.gait_clock > 0:
+        print(f"[grad] gait clock: {obs_dim} inputs (the 75 and sin, cos of the clock), its reward with weight "
+              f"{args.gait_clock:g} (W5c)", flush=True)
     if walk and args.air_time_smooth > 0:
         print(f"[grad] air_time's smooth stand-in (weight taken off a foot) differentiated with weight "
               f"{args.air_time_smooth:g} (W5b)", flush=True)
