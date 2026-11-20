@@ -38,10 +38,12 @@ when a package is finished.
   collected by rocking between the feet.  Paid only for unloading kept 0.06 s (Eric's minimum), it makes the
   optimiser shift the weight from foot to foot at a walking rhythm, but no foot comes up, and 30 min learner runs do
   not change.  No Kaggle run.  Numbers: W5b.
-- **Next (W5c, 20 Nov): a gait clock**, the way Booster trains its own T1: two clock inputs and a reward for
-  stepping in time with them, the inputs at 0 while standing.  The firmware needs a walk agent with 77 inputs
-  (drafted for Eric).  W4 (speed) after it.  W1's standing seeds 2 and 3 wait until the end (only Kaggle time, no
-  code).
+- **W5c (20 Nov, laptop): a gait clock**, the way Booster trains its own T1: two clock inputs and a reward for
+  stepping in time with them, the inputs at 0 while standing.  In the stepping check a foot comes up (0.12 s, 2 of 4
+  robots, weight 4); the learner did not step in a 30 min laptop run.  The firmware needs a walk agent with 77 inputs
+  (drafted for Eric, K1_Deploy branch `walk-clock`).  Numbers: W5c.
+- **Next:** the 77 inputs in the evaluation, export and scoring, then a real run; longer windows (W4).  W1's standing
+  seeds 2 and 3 wait until the end (only Kaggle time, no code).
 - The planner (`mbrl/mpc`, packages 3-5 below) and PPO on pH are **comparison rows** now, not the thesis method.
 - Commands: tests `scripts/test_all.sh`; Kaggle runs are started by the user (`kaggle/run.sh`, commit and push
   first); Python: `~/Dokumente/Robotics/venv/bin/python`; on the laptop one gradient job at a time (7 GB of memory)
@@ -817,6 +819,52 @@ neither breaks nor blows up the derivative.  Not covered by this: repeated steps
   2506.15132): two clock inputs (cos and sin) and a reward for stepping in time with them, the inputs at 0 while
   standing; the firmware agent drafted for Eric.  Separately, W5 did not even stand under the walk world's
   disturbances (78 % falls when asked to stand).
+
+### W5c: a gait clock  **Examined 20 Nov on the laptop: in the stepping check a foot comes up; the learner did not step yet.**  Repeat: `steps/W5c.sh check | lift | laptop`
+- **Why:** W5b gave stepping a slope; the learner spent it on shifting weight, never on a step, even in a quiet world.
+  Walking needs a beat, and the learner cannot find one from Eric's rewards.  The user chose a gait clock on 20 Nov,
+  the way Booster trains its own T1 (Booster Gym, arXiv 2506.15132: the actor gets `(cos 2πft, sin 2πft)`, a
+  feet-swing reward pays for "stepping with both legs according to the set cycle", the cycle is 0 for standing).
+- **What** (Full Body `0297d78`; Model Based RL `ac7efe0`, `077f02f`):
+  - The clock runs while the request, clamped as the network sees it, asks for a move: |(vx, vy)| + |wz| above 0.2,
+    Eric's `air_time` gate.  It moves on by dt / 0.46 s per control step; asked to stand, it is back at 0 and both
+    inputs are 0, so every walk starts with the same foot.
+  - Period and swing share are walk_v9's own on the pH plant at 0.5 m/s (79 cycles: 0.465 s, each swing 0.166 s, 36 %
+    of the cycle).  walk_v9 changes its rhythm with speed: 0.37 s at 0.3 m/s (feet in the air 28 %), 0.53 s at
+    0.8 m/s (47 %); the clock keeps one.
+  - The network gets sin and cos of the clock after the 75 inputs (77).  The term `gait_clock`, per foot
+    `swing x unload + (1 - swing) x (1 - unload)` averaged over the feet, only while the clock runs: its slope tells
+    each foot at every moment to unload (its turn) or to carry.  Not Eric's (`SHAPING`): never in the scored full
+    reward.
+  - `GradWalk(gait_clock=W)`, `train.py --gait-clock W`, `probe_step lift --term clock` (lift.json keeps the traces).
+- **The firmware, a draft for Eric** (K1_Deploy, local branch `walk-clock`, `cc16204`, not pushed): `WalkClockAgent`
+  in `src/agents/sprint.cpp` (the sprint's 75 inputs, gains, decode and limits, plus the clock from a step counter;
+  the clock inputs in the run log), registered as `walk_clock` in `factory.cpp`; the twin's `WalkClock`
+  (`k1_deploy/agents/sprint.py`, reset at every start) and its test.  Full Body's `rl/walk/tests` check that the twin
+  and the training give the same two inputs at every step, through stops and restarts.
+- **The stepping check with the clock** (as W5b's; `outputs/steps/W5c/`; standing still scores 0.64 in time):
+
+  | Term | Weight | Adam steps | In time with the clock | Weight off a foot | Longest off the ground | Robots up 0.1 s | Falls |
+  |---|---|---|---|---|---|---|---|
+  | kept unload (W5b) | 2 | 100 | 0.57 | 86 % | 0.02 s | 0 of 4 | 0 |
+  | gait clock | 2 | 40 | 0.74 | 59 % | 0 | 0 of 4 | 0 |
+  | gait clock | 2 | 100 | 0.78 | 80 % | 0 | 0 of 4 | 0 |
+  | gait clock | 4 | 100 | 0.88 | 94 % | 0.12 s | 2 of 4 | 0 |
+
+  The clock's weight 4 pulls each foot about as hard as the stand-in's 2 (the clock averages over the two feet).
+  With the clock the weight shifts follow the beat (the kept unload's keep their own rhythm), the lean drops
+  (17° → 6°), and at weight 4 the first lift of any check: robot 0's right foot is off the ground for 0.10 s, robot
+  2's for 0.12 s, inside their windows; no hop, no fall.  The bar set before W5b's check (a foot up 0.1 s in 2 of 4
+  robots, no fall, hop or crouch) is met.
+- **The learner, 30 min on the laptop** (`steps/W5c.sh laptop`: weight 4, 77 inputs, the walk world, no in-run
+  evaluation: it still takes 75): 49 updates, 15,680 robot-steps; feet in the air 1.3 % over the first 10 updates,
+  1.5 % over the last 20 (W5: 1-3 %); the clock's reward 0.037 → 0.031 per robot and step; 131 falls.  The bar for
+  Kaggle (feet in the air at least 6 % over the last 20, the clock's reward rising) is not met: no Kaggle run.
+- **Result:** physics and the clock's reward can make a step: when the timing is known, the optimiser lifts a foot.
+  The learner has not found it in 30 min.  Its window (0.4 s) is shorter than one gait cycle (0.46 s), so it never
+  sees a whole step, and 15,680 robot-steps are 0.5 % of W5's run.  Open: the 77 inputs in the in-run evaluation, the
+  export, the video and the scoring (C++ plant, MuJoCo), then a real run; longer windows (W4).  The course page has
+  a chapter for Eric (chapter 10).
 
 ### W6: kick
 - First the derivative through the ball contact (a check like W0).  The ball's 3x3 solve in the Python plant

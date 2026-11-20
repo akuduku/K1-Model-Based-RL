@@ -12,6 +12,7 @@ One script per step of the roadmap in `docs/EXPERIMENTS.md`. "Repeat W0" means: 
     steps/W5b.sh check | gait | lift       air_time's smooth stand-in: tests, on a real gait, the learner's derivative
                                            (WEIGHTS="1 2" ITERATIONS=100)
     steps/W5b.sh laptop | launch           ... a 30 min smoke run (W=2, QUIET=1), the Kaggle run (W=1.0 by default)
+    steps/W5c.sh check | lift | laptop     the gait clock: tests, the stepping check (WEIGHTS="2 4" ITERATIONS=100), a smoke run
 
 | Step | Question | Runs on | Result |
 |---|---|---|---|
@@ -22,6 +23,7 @@ One script per step of the roadmap in `docs/EXPERIMENTS.md`. "Repeat W0" means: 
 | W4 | Speed for walking | moved after W5: a walking window costs about as much as a standing one | open |
 | W5 | Does the professor's formula learn to walk from scratch? | laptop 30 min (smoke run); Kaggle 6 h; scoring 15 min | no: no steps, 93 % falls over the six commands with pushes (78 % when asked to stand); quiet and in MuJoCo it stands but does not move.  Cause: `air_time` has no derivative (W5b) |
 | W5b | Does a smooth stand-in for `air_time` make the method step? | laptop: gait 1 min, lift 20-55 min, smoke run 30 min | not yet: it gives the slope; paid only for unloading kept 0.06 s (Eric's minimum), the optimiser shifts the weight from foot to foot instead of rocking (86 % off a foot at weight 2), but no foot comes up, and 30 min learner runs do not change; no Kaggle run |
+| W5c | Does a gait clock (two inputs, a reward for stepping in time) make the method step? | laptop: lift 25-55 min, smoke run 30 min | in the stepping check yes: at weight 4 a foot comes up (0.12 s in 2 of 4 robots), the weight shifts in time with the clock; the learner did not step in 30 min (feet in the air 1.5 %); no Kaggle run yet (the 77 inputs in evaluation, export and scoring are open) |
 
 ## What a step script does
 
