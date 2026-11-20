@@ -64,6 +64,28 @@ def put_on_floor(m, d) -> None:
         d.qpos[2] -= min(gaps)
 
 
+def resting_depth(b) -> float:
+    """How deep MuJoCo's soft floor lets the standing robot sink [m]: the robot settled for 0.5 s on its home pose
+    (the backend's PD holding it), the median penetration of its floor contacts.  The like-for-like of the pH plant's
+    state.weight_sink: without it MuJoCo starts just touching its floor and first drops into it."""
+    import mujoco
+
+    m = b.m
+    d = mujoco.MjData(m)
+    d.qpos[:3] = (0.0, 0.0, 1.0)
+    d.qpos[3:7] = (1.0, 0.0, 0.0, 0.0)
+    d.qpos[7:] = b.home
+    put_on_floor(m, d)
+    mujoco.mj_forward(m, d)
+    for _ in range(500):
+        tau = b.kp_np * (b.home - d.qpos[7:]) - b.kd_np * d.qvel[6:]
+        d.ctrl[:] = np.clip(tau, -b.tau_max, b.tau_max)
+        mujoco.mj_step(m, d)
+    floor = {g for g in range(m.ngeom) if m.geom_bodyid[g] == 0}
+    depth = [-d.contact[i].dist for i in range(d.ncon) if d.contact[i].geom1 in floor or d.contact[i].geom2 in floor]
+    return float(np.median(depth)) if depth else 0.0
+
+
 def start_states(rp: Replay, theta: torch.Tensor) -> tuple[np.ndarray, np.ndarray]:
     """(W,29) qpos and (W,28) qvel in MuJoCo's convention, from Replay's estimate of each window's start."""
     plant = rp.plant
@@ -122,10 +144,14 @@ def replay_mujoco(rp: Replay, delay_ms: float, self_collision: bool = False) -> 
     return errors(rp, T(th_pred), T(gy_pred), T(gr_pred))
 
 
-def mujoco_trajectories(rp: Replay, delay_ms: float, self_collision: bool = False) -> dict:
-    """What Replay.run(keep_traj=True) keeps, from MuJoCo: theta, qd, gyro, grav, tau (W,H,...), NaN from the step a
-    window diverges.  For full-rate logs (rp.low): the logged command and gains go straight to the motor driver, one
-    command per replay step; the PD law and its torque limit are MuJoCoBackend.step's."""
+def mujoco_trajectories(rp: Replay, delay_ms: float, self_collision: bool = False, sink: bool = False,
+                        leg_friction: float = 0.0) -> dict:
+    """What Replay.run(keep_traj=True) keeps, from MuJoCo: theta, qd, gyro, grav, tau, base (trunk position and
+    quaternion), foot_force (W,H,...), NaN from the step a window diverges.  For full-rate logs (rp.low): the logged
+    command and gains go straight to the motor driver, one command per replay step; the PD law and its torque limit
+    are MuJoCoBackend.step's.  sink: start at MuJoCo's own resting depth in the floor (resting_depth), as the pH
+    plant starts with its weight on its floor springs.  leg_friction [N m]: Coulomb friction (MuJoCo's frictionloss)
+    in the twelve leg joints: a what-if of sim2real's, the pH plant has none."""
     import mujoco
 
     qpos0, qvel0 = start_states(rp, ParamSpace().neutral(1))
@@ -133,18 +159,22 @@ def mujoco_trajectories(rp: Replay, delay_ms: float, self_collision: bool = Fals
     m, d = b.m, b.d
     if not self_collision:
         floor_only(m)
+    m.dof_frictionloss[6 + 10:6 + 22] = leg_friction
     if abs(m.opt.timestep - rp.h) > 1e-12:
         raise ValueError("MuJoCo's step and the plant's differ")
     W, H, sub = rp.W, rp.H, rp.substeps
     hist, target = rp.hist.cpu().numpy(), rp.target.cpu().numpy()
     kp, kd = rp.base_kp.cpu().numpy(), rp.base_kd.cpu().numpy()
     out = {"theta": np.full((W, H, 22), np.nan), "qd": np.full((W, H, 22), np.nan), "gyro": np.full((W, H, 3), np.nan),
-           "grav": np.full((W, H, 3), np.nan), "tau": np.full((W, H, 22), np.nan)}
+           "grav": np.full((W, H, 3), np.nan), "tau": np.full((W, H, 22), np.nan), "base": np.full((W, H, 7), np.nan),
+           "foot_force": np.full((W, H, 2), np.nan)}
+    depth = resting_depth(b) if sink else 0.0
     for w in range(W):
         mujoco.mj_resetData(m, d)
         d.qpos[:] = qpos0[w]
         d.qvel[:] = qvel0[w]
         put_on_floor(m, d)
+        d.qpos[2] -= depth
         mujoco.mj_forward(m, d)
         ring = deque([hist[w, k].copy() for k in range(b.lag - 1, -1, -1)], maxlen=b.lag + 1)
         for k in range(H):
@@ -161,6 +191,9 @@ def mujoco_trajectories(rp: Replay, delay_ms: float, self_collision: bool = Fals
             out["theta"][w, k], out["qd"][w, k], out["gyro"][w, k] = d.qpos[7:], d.qvel[6:], d.qvel[3:6]
             out["grav"][w, k] = projected_gravity(torch.as_tensor(d.qpos[3:7])[None])[0].numpy()
             out["tau"][w, k] = d.ctrl
+            out["base"][w, k] = d.qpos[:7]
+            out["foot_force"][w, k] = b._foot_force()
+    out["resting_depth_mm"] = depth * 1e3
     return out
 
 

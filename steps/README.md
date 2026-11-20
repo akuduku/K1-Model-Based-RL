@@ -14,6 +14,8 @@ One script per step of the roadmap in `docs/EXPERIMENTS.md`. "Repeat W0" means: 
     steps/W5b.sh laptop | launch           ... a 30 min smoke run (W=2, QUIET=1), the Kaggle run (W=1.0 by default)
     steps/W5c.sh check | lift | laptop     the gait clock: tests, the stepping check (WEIGHTS="2 4" ITERATIONS=100), a smoke run
     steps/W5c.sh launch | fetch | score    ... the Kaggle run grad-walk-clock-v1 (W=4); scored with the walk_clock agent's 77 inputs
+    steps/P1.sh check | robot | energy | view   the physics comparison: MuJoCo and pH against the real robot's log,
+                                           the energy of one walk on both, the Rerun view (P = physics, beside the W steps)
 
 | Step | Question | Runs on | Result |
 |---|---|---|---|
@@ -25,6 +27,7 @@ One script per step of the roadmap in `docs/EXPERIMENTS.md`. "Repeat W0" means: 
 | W5 | Does the professor's formula learn to walk from scratch? | laptop 30 min (smoke run); Kaggle 6 h; scoring 15 min | no: no steps, 93 % falls over the six commands with pushes (78 % when asked to stand); quiet and in MuJoCo it stands but does not move.  Cause: `air_time` has no derivative (W5b) |
 | W5b | Does a smooth stand-in for `air_time` make the method step? | laptop: gait 1 min, lift 20-55 min, smoke run 30 min | not yet: it gives the slope; paid only for unloading kept 0.06 s (Eric's minimum), the optimiser shifts the weight from foot to foot instead of rocking (86 % off a foot at weight 2), but no foot comes up, and 30 min learner runs do not change; no Kaggle run |
 | W5c | Does a gait clock (two inputs, a reward for stepping in time) make the method step? | laptop: lift 25-55 min, smoke run 30 min | in the stepping check yes: at weight 4 a foot comes up (0.12 s in 2 of 4 robots), the weight shifts in time with the clock; the learner did not step in 30 min (feet in the air 1.5 %); no Kaggle run yet (the 77 inputs in evaluation, export and scoring are open) |
+| P1 | Which physics predicts the real K1 better, MuJoCo or the pH plant, and how sure is that? | laptop: robot 15 min, energy 2 min, view 5 min | no winner: on kick_walk pH a little closer in the joints (−0.047 deg of ~1.05, about the method's resolution, one 40 s run), on both old get-ups MuJoCo (+0.31, +0.33 deg of 5-6); after the start fix (flat feet) both still drift while the robot stands (gear friction, the ankle linkage); energy: no difference shown (within pH's −10 % ledger residual); see docs/EXPERIMENTS.md, "The physics comparison" |
 
 ## What a step script does
 

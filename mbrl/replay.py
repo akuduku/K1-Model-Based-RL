@@ -106,6 +106,9 @@ class Replay:
                                       policy_dt=self.step_dt)
         self.plant = K1PHPlantNative(model=model, batch=self.B, timestep=plant_dt, firmware=self.cfg)
         self.D = fw.delay_line_length(self.cfg, plant_dt)
+        # the sole points of each foot (left, right): the floor force on a foot for the trajectories
+        self.sole = torch.stack([model.contact_is_sole & (model.contact_body == model.body_names.index(n))
+                                 for n in ("left_foot_link", "right_foot_link")]).to(self.device)
         self._tensors(model)
 
     # ------------------------------------------------------------------ the windows as tensors (W, ...)
@@ -176,6 +179,8 @@ class Replay:
         gr_pred = torch.empty(pl.B, H, 3, dtype=self.dtype, device=self.device)
         qd_pred = torch.empty(pl.B, H, NJ, dtype=self.dtype, device=self.device) if keep_traj else None
         tau_pred = torch.empty(pl.B, H, NJ, dtype=self.dtype, device=self.device) if keep_traj else None
+        base_pred = torch.empty(pl.B, H, 7, dtype=self.dtype, device=self.device) if keep_traj else None
+        foot_pred = torch.empty(pl.B, H, 2, dtype=self.dtype, device=self.device) if keep_traj else None
         targets = rep(self.target)
         for k in range(H):
             gen = None
@@ -191,6 +196,9 @@ class Replay:
             if keep_traj:
                 qd_pred[:, k] = info.extra["nu"][:, NB:]
                 tau_pred[:, k] = info.torque
+                base_pred[:, k] = pl.q[:, :7]
+                fz = info.contact_force[..., 2]
+                foot_pred[:, k] = torch.stack([(fz * m).sum(-1) for m in self.sole.to(fz.dtype)], -1)
         e_th = (th_pred - rep(self.obs_theta)) ** 2            # (B,H,22)
         e_gy = ((gy_pred - rep(self.obs_gyro)) ** 2).sum(-1)    # (B,H)
         e_gr = ((gr_pred - rep(self.obs_grav)) ** 2).sum(-1)
@@ -212,6 +220,8 @@ class Replay:
             out["qd"] = qd_pred.view(n, W, H, NJ)
             out["grav"] = gr_pred.view(n, W, H, 3)
             out["tau"] = tau_pred.view(n, W, H, NJ)
+            out["base"] = base_pred.view(n, W, H, 7)          # trunk position and quaternion (w x y z), world
+            out["foot_force"] = foot_pred.view(n, W, H, 2)    # floor force along the normal, left and right [N]
         return out
 
     def run(self, theta: torch.Tensor, residual=None, keep_traj: bool = False) -> dict:

@@ -54,9 +54,13 @@ def _rpy(quat: np.ndarray) -> np.ndarray:
                      np.arcsin(np.clip(2 * (w * y - z * x), -1, 1)), np.zeros_like(w)), -1)
 
 
-def synthetic_low_log(engine: str, seconds: float = 2.0, delay_ms: float = 7.0, seed: int = 0):
+def synthetic_low_log(engine: str, seconds: float = 2.0, delay_ms: float = 7.0, seed: int = 0, still_s: float = 0.0,
+                      gains: str = "firmware", pose=None):
     """A full-rate "robot log" (mbrl/lowlog.py) made by one engine: "ph" or "mujoco".  A standing robot whose legs and
-    arms follow small sines; a new command every 5 ms, a state every 1 ms, the motor drivers' torque as tau_est."""
+    arms follow small sines (after still_s seconds of standing still); a new command every 5 ms, a state every 1 ms,
+    the motor drivers' torque as tau_est.  gains: a ph_k1.firmware preset; pose (22,): the stance (default: the
+    engine's home).  With the defaults the robot slowly tips over (no balance); gains "standup" with the stand pose
+    rl.stand.contract.DEFAULT_QPOS stands still enough for the flat-feet tests (legs below 0.03 rad/s for 3 s)."""
     from mbrl import lowlog
     from mbrl.replay_mujoco import floor_only
     from ph_k1 import firmware as fw
@@ -64,7 +68,7 @@ def synthetic_low_log(engine: str, seconds: float = 2.0, delay_ms: float = 7.0, 
     from rl.walk.backends import MuJoCoBackend
 
     model = load_k1(dtype=torch.float64)
-    kp, kd = (g.numpy().copy() for g in fw.gains(model, "firmware"))
+    kp, kd = (g.numpy().copy() for g in fw.gains(model, gains))
     rng = np.random.default_rng(seed)
     phase = rng.uniform(0, 2 * math.pi, 22)
     amp = np.zeros(22)
@@ -72,24 +76,26 @@ def synthetic_low_log(engine: str, seconds: float = 2.0, delay_ms: float = 7.0, 
     n = int(seconds * 1000)
     rec = {k: [] for k in ("q", "dq", "gyro", "quat", "tau", "tc", "cmd")}
     if engine == "ph":
-        cfg = FirmwareConfig(gains="firmware", pos_clamp=False, slew=False, target_clamp=False, overspeed_guard=False,
+        cfg = FirmwareConfig(gains=gains, pos_clamp=False, slew=False, target_clamp=False, overspeed_guard=False,
                              delay_ms=(delay_ms, delay_ms), policy_dt=1e-3)
         pl = K1PHPlantNative(model=model, batch=1, timestep=1e-3, firmware=cfg)
-        pl.reset()
+        pl.reset() if pose is None else pl.reset(pose=torch.as_tensor(pose, dtype=torch.float64))
         pl.set_delay(delay_ms, delay_ms)
         base = pl.theta[0].numpy().copy()
         K = lambda a: torch.as_tensor(a, dtype=torch.float64)[None]  # noqa: E731
     else:
         import mujoco
 
-        b = MuJoCoBackend(model, delay_ms=delay_ms, gain_preset="firmware", slew=False)
+        b = MuJoCoBackend(model, delay_ms=delay_ms, gain_preset=gains, slew=False,
+                          **({} if pose is None else {"home": np.asarray(pose, dtype=np.float64)}))
         floor_only(b.m)
         base = b.d.qpos[7:].copy()
         ring = [base.copy()] * (b.lag + 1)
     target = base.copy()
     for k in range(n):
         if k % 5 == 0:
-            target = base + amp * np.sin(2 * math.pi * 1.5 * k * 1e-3 + phase)
+            moving = k * 1e-3 >= still_s
+            target = base + moving * amp * np.sin(2 * math.pi * 1.5 * (k * 1e-3 - still_s) + phase)
             rec["tc"].append(k * 1e-3)
             rec["cmd"].append(target.copy())
         if engine == "ph":

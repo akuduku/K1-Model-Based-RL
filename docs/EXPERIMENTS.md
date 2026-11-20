@@ -901,3 +901,87 @@ neither breaks nor blows up the derivative.  Not covered by this: repeated steps
 - Runs: kick from standing, then walk + kick, for both arms; evaluation with `rl/kick/evaluate.py`.
 - The 166th input (seconds since the request) is optional (`--phase-input`); a policy that uses it needs one line in
   the firmware's kick_walk agent.
+
+## The physics comparison (P1): MuJoCo and the pH plant against the real robot  **Checked and corrected 20 Nov.**  Repeat: `steps/P1.sh check | robot | energy | view`
+
+Which physics predicts the real K1 better, and how sure is that?  `mbrl/sim2real.py` puts both engines into the
+robot's measured state at the start of a 0.4 s window and feeds them the commands and gains the motor drivers got
+(LowCmd, 7 ms late); each window is compared with the log, paired (same windows, same inputs for both).  Data: the
+one full-rate run `MA/Karls Repo/Repo_Eric/rec_kick_walk_20261113_222701` (kick_walk_031, 40 s: standing, walking
+up to 0.84 m/s, two right-foot kicks) and the two converted get-ups (gains assumed, no torque estimate).
+
+What the check of 20 Nov found, and what changed (`--start as-before` keeps the old start: its numbers are those of
+16 Nov exactly):
+- **The feet were not flat at the window starts.**  While the robot stands still, the logged joints and attitude put
+  the left sole 2.8 deg off the floor.  Split into the two feet's difference and their common tilt: the difference is
+  steady (left 2.3 deg rolled against right in all seven still bouts: an offset in the leg chain, likely the ankles'
+  parallel linkage); the common tilt moves from bout to bout with the robot's own attitude estimate while the legs
+  stay (+-1 deg; the IMU and the Mahony filter agree).  Both simulated robots first rocked onto their feet: while the
+  robot stood they did worse than "nothing moves".  Now (`mbrl/calib.py`, start `flat-feet`, the default): constant
+  ankle offsets make the soles parallel (left pitch +0.59, roll -1.08, right pitch -0.11, roll +1.22 deg; the two
+  halves of the run agree within 0.3 deg), and in windows that start while the robot stands still the trunk is turned
+  (at most 3 deg, only onto a whole sole) until the touching sole corners lie flat.  Turning in moving windows, or onto
+  an edge, made things worse, and on an engine's own log any turn adds error, so it stays where the evidence is.
+  `tests/test_calib.py`: a fake 2 deg ankle offset is found and undone.
+- MuJoCo started just touching its floor, the plant with its weight on its springs.  MuJoCo now starts at its
+  resting depth: 0.0004 mm (its floor is stiff), no measurable change.
+- Tilt is scored as its change since the window start, so the attitude estimate's slow drift drops out.
+- Window groups by what the robot did: still 140, walking (twist commanded) 134, no twist but legs moving 98 (on
+  kick_walk: the walks to the ball, the two kicks, the stops).
+- Energy (`mbrl/energy_compare.py`; Full Body `rl/walk/backends.py`, `energy_book()`): booked at every 1 ms step on
+  both engines (pH from its ledger) instead of sampled once per 20 ms.  The samples missed 20-40 % of the battery
+  power.
+
+| kick_walk run, joint error [deg], median of the windows | nothing moves | MuJoCo | pH | pH - MuJoCo, mean (95 %) |
+|---|---|---|---|---|
+| all 372, start as-before (16 Nov) | 2.136 | 1.147 | 1.113 | -0.078 (-0.088 ... -0.067) |
+| all 372, start flat-feet | 2.136 | 1.080 | 1.051 | -0.047 (-0.058 ... -0.036) |
+| still 140: as-before -> flat-feet | 0.023 | 0.881 -> 0.762 | 0.818 -> 0.749 | |
+| walking 134: as-before -> flat-feet | 4.978 | 1.742 -> 1.747 | 1.632 -> 1.621 | |
+| no twist, legs moving 98 (the kicks, the stops): as-before -> flat-feet | 2.246 | 1.150 -> 1.096 | 1.109 -> 1.065 | |
+| back get-up getup_2236, 29 windows, flat-feet | | 5.128 | 5.610 | +0.310 (+0.125 ... +0.516) |
+| front get-up getup_front_2250, 24 windows, flat-feet | | 6.308 | 6.379 | +0.325 (+0.079 ... +0.722) |
+
+Reading:
+- On kick_walk pH is a little closer in the joints in every group; the lead is small (about 4 %, in walking about 6 %)
+  and of the size of the method's resolution (pH replaying its own log: 0.05 deg).  On both get-ups MuJoCo is closer
+  (about 5 %; old converted logs: gains assumed, no torque estimate).  So no engine wins across tasks.  One robot,
+  one 40 s full-rate run.
+- A robot lying still on the floor (the get-ups) is not "standing still": the flat-feet calibration only uses an
+  upright trunk (first version of 20 Nov took the front get-up's lying samples for standing: ankle offsets of 4-5 deg,
+  fixed the same day, `tests/test_calib.py`).
+- While the robot stands, both engines still move about 0.75 deg away from it ("nothing moves": 0.02).  They hold the
+  pose stiffer than the robot (in about 75 % of the still windows the joint ends nearer its target), but "the motors
+  give only 75 %" (the torque estimate's slope) makes the joints worse, while 1 N m of Coulomb friction in MuJoCo's
+  leg joints takes the still windows' tilt error from 0.76 to 0.28 deg: the robot's joints stick (gear friction),
+  which neither engine models.  The ankles (a parallel linkage, modelled as two plain joints) carry most of it.
+  What-ifs only (in the report): the comparison itself fits nothing.
+- Walking windows: the engines' trunks travel 20 cm in 0.4 s, the robot's leg odometry 8 cm; the start velocity
+  guessed from the stance foot is 0.6 m/s against the odometry's 0.23 m/s.  Which one is right is open (no trunk
+  velocity is measured); the joint errors hardly depend on it (trunk velocity 0: under 1 %).
+- Energy, battery power pH / MuJoCo booked every 1 ms at 0.5 / 1 / 1.5 / 2 / 2.5 m/s: 122/122, 177/190, 315/351,
+  559/519, 797/742 W, pH - MuJoCo 0, -7, -10, +8, +7 % (sampled: -9, -10, -7, +18, +25 %).  pH's ledger misses
+  10-11.5 % of the supplied energy while walking (its integrator at the foot impacts): the engines' difference lies
+  inside that, so no energy difference is shown.  The 8 Nov reading "pH needs 7-13 % less up to 1.5 m/s" does not
+  hold.
+- The sim-to-sim gait comparison (Full Body `rl/walk/compare.py`, three walk policies) on the standard model gives
+  the 6 Nov numbers of the hand-variant model to the third digit (its "mechanical power" is still sampled every 20 ms).
+
+What to record next (the robot's logs are the real physics; to do with Eric):
+1. Start every recording with 10 s of standing still on a hard floor (the flat-feet calibration).
+2. Hanging, feet free: slow and fast sweeps of single joints (hip, knee, ankle): motors and gears without contact and
+   without a trunk to guess (friction, the torque estimate's scale, the ankle linkage).
+3. Standing 60 s; squats, slow and fast: contact under load, the drift while standing.
+4. Walking at 0.3 / 0.6 / 1.0 m/s straight, 10 s each; kicks.
+5. Get-ups with `--low-rec` (the old ones have no torque estimate and assumed gains).
+6. If possible, the trunk's real motion (the camera on fixed markers, or a motion-capture session): it settles the
+   trunk-velocity question above.
+Flags: `--rec --low-rec` always; `--cam-rec` only where the camera is needed (74 MB per 40 s).
+
+Rerun (`steps/P1.sh view`, or `python -m mbrl.sim2real <rec.csv> --view [--no-camera]`; `mbrl/sim2real_view.py`, on
+top of K1 Debug's view, which stays unchanged): MuJoCo (orange) and pH (blue) with their own trunks over the real
+robot (drawn see-through; the camera follows its trunk), each engine's floor force per foot as arrows, the engines
+gone between the shown windows; tabs: summary, per window (click a point to go to that window), prediction error,
+start (the soles' tilt over the run, the turns), energy, leg angles and torques; the error, energy and joint plots
+scroll with the cursor (+-1 s) and zoom together; every recording carries how it was made (recording property
+"sim2real").  Leg plots only: 143 MB without the camera (was 280 MB with it).
