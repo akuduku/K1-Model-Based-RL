@@ -4,7 +4,7 @@ This file is the working plan of the thesis experiments: the rules, what exists,
 package has a goal, the files it touches, what to reuse, and a check that says it is done. Update the status tables
 when a package is finished.
 
-## Start here (state of 19 Nov 2026)
+## Start here (state of 20 Nov 2026)
 
 - **The thesis method** (decided by the user on 16 Nov): the professor's formula as written
   (`MA/ph_formula_rl_mbrl.pdf`): minimise L = running cost (term 1) + cost at the end (term 2) over the
@@ -28,8 +28,12 @@ when a package is finished.
   straighter.  Open: the weights keep growing over a run and the power with them (3.5 W at the end).  Numbers: W3.
 - **Every step can be repeated by name:** `steps/W0.sh` ... `steps/W3.sh` (`steps/list.sh`, `steps/README.md`);
   each finished step has a git tag of the same name in both repositories.
-- **Next (decided 19 Nov):** W5, walking from scratch (`steps/W5.sh`; the trainer is built, the first Kaggle run
-  is the user's launch).  W4 (speed) moved after it: a walking window costs about as much as a standing one.  W1's
+- **Walking from scratch failed (W5, 20 Nov):** Kaggle `grad-walk-v1` (6 h, 3.15 M steps) took no steps: the
+  robots stood or slid in place, the curriculum never left its first stage, and with the walk world's pushes, delays
+  and gain errors 93 % fell over the six scoring commands (78 % even when asked to stand).  Quiet, and in MuJoCo, it
+  stands but does not move.  Cause, examined: Eric's `air_time`, the only term that pays for lifting a foot, has no
+  derivative and reached the learner in no way.  Numbers: W5.
+- **Next:** W5b, a smooth stand-in for `air_time` (examined on the laptop, see W5b).  W4 (speed) after it.  W1's
   standing seeds 2 and 3 wait until the end (only Kaggle time, no code).
 - The planner (`mbrl/mpc`, packages 3-5 below) and PPO on pH are **comparison rows** now, not the thesis method.
 - Commands: tests `scripts/test_all.sh`; Kaggle runs are started by the user (`kaggle/run.sh`, commit and push
@@ -82,7 +86,7 @@ walk policy and can start from his kick motion) is a **reference**, not the mode
 | Stage | Skill | Agent contract | PPO arm | Model-based arm |
 |---|---|---|---|---|
 | 1 | stand under pushes | firmware `stand`, 72 -> 22 (`rl/stand`) | done: `stand-ph-v1` (3000 iterations, ~295 M steps, 7 h on a T4, no falls) | planner: `mb-stand-v1` + fix (6.8 W, 5.5 % falls); **thesis method: `grad-stand-v1c` (1.6 M steps, 2.9 h on a T4: 1.0 % falls, 2.3 W); with term 2's weights learned (W3): `grad-stand-weights` (0.82 M steps, 1.4 h: 0.5 % falls, 2.4 W); seeds 2 and 3 open (W1)** |
-| 2 | walk on velocity commands, standing included; run = higher commands | sprint family, 75 -> 22 | task done (W2); training open (W5) | task done and checked (W2); training open (W3-W5) |
+| 2 | walk on velocity commands, standing included; run = higher commands | sprint family, 75 -> 22 | task done (W2); training open (W5) | task done and checked (W2); first training `grad-walk-v1` (W5, 3.15 M steps, 6 h on a T4) failed: no steps, 93 % falls over the six commands; cause examined (W5b) |
 | 3 | kick from standing | kick_walk, 165 (166 with the request clock) -> 22 | open (W6) | open (W6) |
 | 4 | walk, stay and kick | kick_walk | open (W6) | open (W6) |
 
@@ -604,7 +608,7 @@ neither breaks nor blows up the derivative.  Not covered by this: repeated steps
 - Derivative code in the C++/CUDA plant (`Full Body/ph_k1_cuda/include/ph_k1/step.hpp`, about 800 lines to
   differentiate by hand and to test against the Python plant) only if walking is too slow after this.
 
-### W5: walk, then run  Repeat: `steps/W5.sh check | laptop | launch | fetch | score`
+### W5: walk, then run  **Done 20 Nov: no, it does not step (cause examined in W5b).**  Repeat: `steps/W5.sh check | laptop | launch | fetch | score`
 - **What:** walking from scratch with the thesis method: `python -m mbrl.grad.train --task walk` (Kaggle:
   `TASK=grad-walk`).  The task of W2 (`Full Body/rl/walk/task.py`, Eric's rewards and requests) on the
   differentiable plant (`mbrl/grad/walk_env.py`), in the world of the scoring environment (`rl/walk/env.py
@@ -681,6 +685,40 @@ neither breaks nor blows up the derivative.  Not covered by this: repeated steps
   the air 1-3 % of the time (no steps yet), training falls 12-20 % of the robots per window, 40-55 W.  Harder than
   standing at the start: the sprint's home pose tips over by itself within 1.6 s (standing's home pose stood), so the
   network must learn to balance first.  The curriculum stayed at x 0.25.
+- **Result of `grad-walk-v1` (Kaggle T4, 19 Nov 19:54 -> 20 Nov 02:14, 1024 robots, seed 1; 154 updates, 3.15 M
+  environment steps, 365.6 min; `outputs/kaggle/grad-walk-v1/`, W&B run `nudz8axd`; tag `W5`): it does not walk,
+  and with the walk world's disturbances it does not stand either.**
+  - The curriculum never left x 0.25.  It needs at most 0.2 % of the robot-windows to end in a fall over 20 updates;
+    the run had 18 % (updates 1-25), 10-11 % (51-100) and 12-14 % at the end.  The speed error stayed at the
+    requested speed (0.25 against 0.23 m/s): the robots did not move toward the request.
+  - No steps: feet in the air 1.6 % of the time at the start, 3.4 % at the end; the feet on the floor slid more
+    (0.04 -> 0.06 m/s).  Power from the battery 48 -> 60 W (Eric's walk_v9: 7 W standing, 105 W at 0.5 m/s).
+  - In-run evaluations (15, 64 robots per command, 10 s, pushes and noise): 92-98 % fell over the six commands at
+    every one.  Asked to stand: 73-91 % fell (5.1-6.6 s up on average); forward 0.5 m/s: 89-100 % fell, speed error
+    0.44-0.59 m/s.  Best around updates 59-79, then worse (time up 3.3 -> 2.2 s over the commands, power when
+    standing 41 -> 57 W).  The video (`videos/walk_00059.mp4`): a crouched stand in place, no step, tipping over.
+  - Term 2's learned weights kept drifting: at the end upright 18.3 s, angular momentum 9.5, joint limits 8.6, feet
+    parallel 4.2; the speed tracking's weight fell from 1 to 0.32.
+  - Scored (`steps/W5.sh score`, update 59 by the rule, 1.21 M steps, 1.9 h; log
+    `outputs/steps/W5-score/20261120-0216_7b0e185.log`).  pH plant with pushes and noise, 3 seeds x 128 robots, 10 s
+    per command: stand 298 of 384 fell (47 W), forward 0.5 359 (speed error 0.44 m/s, 56 W), forward 1.0 378, back
+    384, sideways 384, turn 344.  Quiet: stand, forward 0.5 and turn without a fall but without moving; forward
+    1.0, back and sideways all fell.  MuJoCo, 20 s per command, quiet and pushed (0.3 m/s): stands still on stand,
+    forward 0.5 and 1.0 and turn (speed 0), falls on back (3.0 s) and sideways (1.2 s).
+
+    | Run | Falls (6 commands, pushes) | Speed error at 0.5 m/s | Power at 0.5 m/s | Energy per metre |
+    |---|---|---|---|---|
+    | grad-walk-v1, update 59 (1.21 M environment steps, 1.9 h; seeds 7, 8, 9 x 128 robots x 6 commands) | 93.2 % | 0.44 m/s | 56 W | 214 J/m |
+    | Eric's walk_v9 (the team's PPO, MuJoCo; W2, quiet, 16 robots) | 0 % | 0.05-0.10 m/s | 105 W | |
+
+  - Examined (W5b): (1) No step.  `air_time`, Eric's only term that pays for lifting a foot, counts yes/no events,
+    so its derivative is zero, and it reached the learner in no way: it is left out of the window, not in V's
+    targets (`--value-reward smooth`), and the learned term 2 (14 state costs, no foot signals) cannot express it.
+    Following the learner's own derivative from standing, the robot leans forward instead of stepping (W5b, `lift`
+    without the stand-in).  (2) It does not stand either under the walk world's disturbances, while W1's stand task
+    reached about 1 % falls: the sprint's home pose tips over by itself, the walk world is harsher (gain errors
+    0.6-1.3, delays 10-70 ms, encoder bias), and the walk reward pays mostly for tracking (the tracking terms are the
+    largest part of the reward at the end; `terminated` costs 0.013 per robot and step).
 - Other rows to compare with later: PPO on pH, the planner.
 
 ### W6: kick

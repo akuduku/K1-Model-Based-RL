@@ -14,7 +14,12 @@
 #         speed error was at most 30 % of the requested speed, up to Eric's ranges (x 1, sprints up to 2 m/s).
 #         In-run evaluation and scoring: six fixed commands (stand, forward 0.5 and 1.0, back 0.5, sideways 0.5 m/s,
 #         turn 1 rad/s) on the C++ plant; scoring also in MuJoCo
-# Then:   (filled in when the step is finished)
+# Then:   20 Nov 2026 (tag W5), Kaggle grad-walk-v1 (154 updates, 3.15 M steps, 6 h): it does not walk.  No steps
+#         (feet in the air 2-3 %), the speed error stayed at the requested speed, the curriculum stayed at x 0.25
+#         (10-18 % of robot-windows fell against the 0.2 % it needs).  Scored update 59 (1.21 M steps, 1.9 h), pH
+#         with pushes, 3 seeds x 128 robots: 93.2 % fell over the six commands (stand 298 of 384), speed error at
+#         0.5 m/s 0.44 m/s, 56 W.  Quiet: stands, does not move.  MuJoCo: stands 20 s on stand, forward and turn
+#         (speed 0), falls on back and sideways.  Cause: air_time has no derivative (W5b).
 set -euo pipefail
 . "$(dirname "$0")/common.sh"
 NAME=grad-walk-v1
