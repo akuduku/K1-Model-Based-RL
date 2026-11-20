@@ -47,6 +47,28 @@ def test_both_plants_pay_the_same_for_the_same_motion():
     assert total[0] == pytest.approx(total[1], abs=1e-5)
 
 
+def test_both_plants_observe_the_same_clock():
+    """With the gait clock (W5c) both environments give the network the same 77 numbers while Eric's walk drives
+    them (it reads the first 75): the clock's sin and cos follow the same rule on the C++ and the Python plant."""
+    if not (CHECKPOINTS / "walk_v9.pt").exists():
+        pytest.skip("k1_sprint is not next to this repository")
+    from rl.walk.env import WalkConfig, WalkEnv, quiet
+
+    cpp = WalkEnv(quiet(WalkConfig(num_envs=1, device="cpu", dtype="float64", seed=3, gait_clock=True), fixed_command=COMMAND))
+    py = GradWalk(1, seed=3, command=COMMAND, gait_clock=1.0)
+    net = torch.jit.load(str(CHECKPOINTS / "walk_v9.pt"), map_location="cpu").eval()
+    obs = cpp.get_observations()
+    with torch.no_grad():
+        for _ in range(30):
+            assert obs["policy"].shape == (1, 77)
+            assert torch.allclose(obs["policy"], py.observe(), atol=1e-5)
+            a = net(obs["policy"][:, :75].float()).double()
+            obs, *_ = cpp.step(a)
+            py.between_steps()
+            py.step(a)
+    assert float(obs["policy"][0, 76]) != 1.0                     # the clock has moved on
+
+
 def test_step_returns_the_terms_with_a_derivative():
     env = GradWalk(2, seed=1, command=COMMAND)
     a = (0.1 * torch.randn(2, NA, dtype=torch.float64)).requires_grad_(True)

@@ -453,7 +453,8 @@ def main():
     if args.eval_robots > 0 and walk:   # the six fixed commands, under the training's conditions
         from rl.walk.env import WalkConfig
         from rl.walk.evaluate import WalkEval
-        evaluate = WalkEval(WalkConfig(num_envs=args.eval_robots, device=args.eval_device, dtype="float32", seed=args.seed),
+        evaluate = WalkEval(WalkConfig(num_envs=args.eval_robots, device=args.eval_device, dtype="float32", seed=args.seed,
+                                       gait_clock=args.gait_clock > 0),
                             args.eval_robots, device=args.eval_device)
     elif args.eval_robots > 0:
         from rl.stand.env import StandConfig
@@ -497,7 +498,10 @@ def main():
         path = run_dir / f"model_{iteration}.pt"
         torch.save(ck, path)
         try:
-            export_bin(path, path.with_name(f"deploy_{iteration}.bin"))
+            if walk:                                    # the sprint agent's 75, or walk_clock's 77 (W5c)
+                export_bin(path, path.with_name(f"deploy_{iteration}.bin"), obs_dim)
+            else:
+                export_bin(path, path.with_name(f"deploy_{iteration}.bin"))
         except Exception as exc:  # noqa: BLE001
             print(f"[export] failed: {type(exc).__name__}: {exc}", flush=True)
         return path
@@ -506,7 +510,8 @@ def main():
     if walk and args.videos:   # one quiet episode on the C++ plant, the requests changing, and its Hamiltonian figure
         from rl.walk.env import WalkConfig
         from rl.walk.video import WalkVideo
-        video = WalkVideo(WalkConfig(num_envs=1, device="cpu", dtype="float32", seed=args.seed), run_dir / "videos")
+        video = WalkVideo(WalkConfig(num_envs=1, device="cpu", dtype="float32", seed=args.seed, gait_clock=args.gait_clock > 0),
+                          run_dir / "videos")
 
     def make_media(it: int, w: dict) -> dict:
         """With every evaluation: the derivative through the pH model in this update's window (figures.py), and with

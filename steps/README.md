@@ -13,6 +13,7 @@ One script per step of the roadmap in `docs/EXPERIMENTS.md`. "Repeat W0" means: 
                                            (WEIGHTS="1 2" ITERATIONS=100)
     steps/W5b.sh laptop | launch           ... a 30 min smoke run (W=2, QUIET=1), the Kaggle run (W=1.0 by default)
     steps/W5c.sh check | lift | laptop     the gait clock: tests, the stepping check (WEIGHTS="2 4" ITERATIONS=100), a smoke run
+    steps/W5c.sh launch | fetch | score    ... the Kaggle run grad-walk-clock-v1 (W=4); scored with the walk_clock agent's 77 inputs
 
 | Step | Question | Runs on | Result |
 |---|---|---|---|

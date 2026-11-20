@@ -50,6 +50,12 @@ def task_of(run: Path) -> str:
     return json.loads(config.read_text()).get("task", "stand") if config.exists() else "stand"
 
 
+def clock_of(run: Path) -> bool:
+    """W5c: the run's policy takes the gait clock (77 inputs, the firmware's walk_clock agent)."""
+    config = run / "config.json"
+    return config.exists() and json.loads(config.read_text()).get("gait_clock", 0.0) > 0
+
+
 def best_checkpoint(run: Path, task: str = "stand") -> tuple[dict, list]:
     """-> (the row of the best in-run evaluation that has a deploy file, all rows with their hours added).
     Standing: fewest falls, then the lowest power.  Walking: fewest falls, then the lowest speed error (none
@@ -88,23 +94,23 @@ def in_mujoco(policy_file: Path, push: float, seconds: float = 20.0) -> str:
 
 
 # ---------------------------------------------------------------------------------------------------- walking (W5)
-def walk_on_ph(policy_file: Path, robots: int, seed: int, quiet: bool) -> dict:
+def walk_on_ph(policy_file: Path, robots: int, seed: int, quiet: bool, clock: bool = False) -> dict:
     """-> {command: rl/walk/evaluate.py play's numbers} for its six COMMANDS, 10 s each from standing."""
     from rl.walk.env import WalkConfig, WalkEnv
     from rl.walk.env import quiet as make_quiet
     from rl.walk.evaluate import COMMANDS, load, play
 
-    cfg = WalkConfig(num_envs=robots, device="cpu", dtype="float32", seed=seed)
+    cfg = WalkConfig(num_envs=robots, device="cpu", dtype="float32", seed=seed, gait_clock=clock)
     env = WalkEnv(make_quiet(cfg) if quiet else cfg)
     act = load(str(policy_file), env)
     with torch.no_grad():
         return {c: play(env, act, c) for c in COMMANDS}
 
 
-def walk_in_mujoco(policy_file: Path, push: float, seconds: float = 20.0) -> list[str]:
+def walk_in_mujoco(policy_file: Path, push: float, seconds: float = 20.0, clock: bool = False) -> list[str]:
     """rl/walk/eval_mujoco.py: one robot per command in MuJoCo through the firmware's loop -> its lines."""
     cmd = [sys.executable, str(paths.full_body_root() / "rl" / "walk" / "eval_mujoco.py"), "--policy", str(policy_file),
-           "--seconds", str(seconds), "--push", str(push)]
+           "--seconds", str(seconds), "--push", str(push)] + (["--gait-clock"] if clock else [])
     out = subprocess.run(cmd, capture_output=True, text=True)        # exit code 1 means: a robot fell
     lines = [line.strip() for line in out.stdout.splitlines() if line.strip().startswith("command")]
     return lines or [f"failed: {out.stderr.strip().splitlines()[-1] if out.stderr.strip() else 'no output'}"]
@@ -131,7 +137,7 @@ def score_walk(run: Path, chosen: dict, best: dict, rows: list, args) -> None:
           + ".", flush=True)
     per = {c: [] for c in COMMANDS}
     for seed in args.seeds:
-        for c, r in walk_on_ph(policy_file, args.robots, seed, quiet=False).items():
+        for c, r in walk_on_ph(policy_file, args.robots, seed, quiet=False, clock=clock_of(run)).items():
             per[c].append(r)
         print(f"  pH plant, pushes and noise, seed {seed}: done", flush=True)
     print(f"pH plant, pushes and noise ({len(args.seeds)} seed{'s' if len(args.seeds) > 1 else ''} x {args.robots} "
@@ -146,13 +152,13 @@ def score_walk(run: Path, chosen: dict, best: dict, rows: list, args) -> None:
         fell_all, n_all = fell_all + fell, n_all + n
         print(f"  {command_name(c):>8s} {fell:4d} of {n:4d} {m['speed_error']:8.3f} m/s {m['yaw_rate_error']:6.3f}/s "
               f"{m['speed']:6.2f} {m['watts']:6.1f} W {m['joule_per_m']:8.1f}", flush=True)
-    q = walk_on_ph(policy_file, args.robots, args.seeds[0], quiet=True)
+    q = walk_on_ph(policy_file, args.robots, args.seeds[0], quiet=True, clock=clock_of(run))
     print(f"  pH plant, quiet (seed {args.seeds[0]}): "
           + ", ".join(f"{command_name(c)} {100 * r['fell']:.0f} % fell, {r['speed_error']:.2f} m/s" for c, r in q.items()))
     if not args.no_mujoco:
         for push in (0.0, 0.3):
             print(f"  MuJoCo, 20 s per command, push {push:g} m/s:")
-            for line in walk_in_mujoco(policy_file, push):
+            for line in walk_in_mujoco(policy_file, push, clock=clock_of(run)):
                 print(f"    {line}", flush=True)
     fwd = table[(0.5, 0.0, 0.0)][2]
     print("\nrow for docs/EXPERIMENTS.md (falls over all six commands; speed error, power and energy per metre at "

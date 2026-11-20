@@ -152,6 +152,29 @@ def test_the_clock_reaches_the_learner(monkeypatch, tmp_path):
     assert first.shape[1] == 77                                          # the network takes the clock
 
 
+def test_a_clock_run_is_evaluated_exported_and_runs_in_mujoco(monkeypatch, tmp_path, capsys):
+    """A --gait-clock run: the final evaluation on the C++ plant feeds 77 inputs, the export writes the walk_clock
+    agent's file (77 -> 22), and the firmware's loop in MuJoCo runs it with its own clock."""
+    run_main(monkeypatch, tmp_path, "--task", "walk", "--robots", "3", "--steps", "3", "--iterations", "1",
+             "--eval-robots", "2", "--gait-clock", "1.0", "--run-name", "e")
+    out = capsys.readouterr().out
+    assert "[eval] failed" not in out and "[export] failed" not in out
+    done = [line for line in out.splitlines() if "done after iteration 1" in line]
+    assert done and " fell " in done[0] and " stood_s " in done[0]       # the evaluation's numbers
+    deploy = tmp_path / "e" / "deploy_1.bin"
+    assert deploy.exists()
+    from ph_k1.model import load_k1
+    from rl.walk.backends import MuJoCoBackend, Walker, load_walk_policy
+
+    walker = Walker(MuJoCoBackend(load_k1()), load_walk_policy(deploy, 77), clock=True)
+    from rl.walk import contract as C
+    twist, want = np.zeros(3), (0.5, 0.0, 0.0)          # the firmware ramps the request: the clock starts past 0.2
+    for _ in range(15):
+        walker.tick(want)
+        twist = C.ramp_twist(twist, np.array(want))
+    assert walker.clock_steps == 15 - 6 and np.hypot(twist[0], twist[1]) > 0.2   # on from the 7th step (0.21 m/s)
+
+
 def test_standing_is_unchanged_by_walking(monkeypatch, tmp_path):
     """The numbers of 2 updates of standing (4 robots, window 4, seed 3, learned term-2 weights), recorded with the
     trainer as it was before walking was added (19 Nov 2026, commit e91df64)."""

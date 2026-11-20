@@ -862,9 +862,12 @@ neither breaks nor blows up the derivative.  Not covered by this: repeated steps
   Kaggle (feet in the air at least 6 % over the last 20, the clock's reward rising) is not met: no Kaggle run.
 - **Result:** physics and the clock's reward can make a step: when the timing is known, the optimiser lifts a foot.
   The learner has not found it in 30 min.  Its window (0.4 s) is shorter than one gait cycle (0.46 s), so it never
-  sees a whole step, and 15,680 robot-steps are 0.5 % of W5's run.  Open: the 77 inputs in the in-run evaluation, the
-  export, the video and the scoring (C++ plant, MuJoCo), then a real run; longer windows (W4).  The course page has
-  a chapter for Eric (chapter 10).
+  sees a whole step, and 15,680 robot-steps are 0.5 % of W5's run.  The course page has a chapter for Eric (chapter 10).
+- **Ready for a real run** (20 Nov afternoon): the 77 inputs reach the in-run evaluation (C++ plant), the export (the
+  walk_clock agent's file, 77 -> 22), the video and the scoring (pH plant and the firmware's loop in MuJoCo, with its
+  own clock counter).  Tests: both plants give the same 77 inputs while walk_v9 walks; a clock run is evaluated,
+  exported and runs in MuJoCo.  `steps/W5c.sh launch` shows the Kaggle run `grad-walk-clock-v1` (W5's settings and
+  only `--gait-clock 4`); it starts only with the user's yes.  Open after it: longer windows (W4).
 
 ### W6: kick
 - First the derivative through the ball contact (a check like W0).  The ball's 3x3 solve in the Python plant
