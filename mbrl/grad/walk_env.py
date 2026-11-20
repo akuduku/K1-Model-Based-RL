@@ -13,8 +13,8 @@ step() returns the reward of the terms with a derivative (what is differentiated
 planner get it, is in the info.  The counting terms (rl/walk/task.py COUNTS: air_time, terminated) have no derivative.
 `terminated` reaches the learner as the fall charge (train.py).  `air_time` reached it in no way in W5 (the learned
 term 2 neither learns it nor can express it), and the robots stood instead of stepping; `air_time_smooth=w` adds its
-smooth stand-in (rl/walk/task.py STAND_INS: the weight a foot has taken off the ground) with weight w to what is
-differentiated (W5b).  The logged full reward stays Eric's terms.
+smooth stand-in (rl/walk/task.py STAND_INS: the weight a foot has taken off the ground and kept off for 3 control
+steps) with weight w to what is differentiated (W5b).  The logged full reward stays Eric's terms.
 """
 
 from __future__ import annotations

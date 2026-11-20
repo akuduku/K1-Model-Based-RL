@@ -339,7 +339,8 @@ def main():
                     help="walk: ... and the speed error was at most this x the requested speed")
     ap.add_argument("--air-time-smooth", type=float, default=0.0,
                     help="walk: weight of air_time's smooth stand-in (Full Body rl/walk/task.py STAND_INS: the weight a "
-                         "foot has taken off the ground), differentiated beside Eric's terms (W5b); 0 = off, as in W5")
+                         "foot has taken off the ground and kept off for 3 control steps), differentiated beside Eric's "
+                         "terms (W5b); 0 = off, as in W5")
     ap.add_argument("--quiet", action="store_true", help="no sensor noise, no pushes, 20 ms delay")
     ap.add_argument("--iterations", type=int, default=1_000_000)
     ap.add_argument("--minutes", type=float, default=0.0)

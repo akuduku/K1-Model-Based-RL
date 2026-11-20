@@ -60,14 +60,17 @@ def test_step_returns_the_terms_with_a_derivative():
 
 
 def test_air_time_stand_in_pays_for_the_weight_taken_off_a_foot():
-    """air_time's smooth stand-in (W5b) on chosen ground forces, foot clocks and requests."""
+    """air_time's smooth stand-in (W5b) on chosen ground forces, unload histories, foot clocks and requests: it pays
+    the unload a foot has kept for 3 control steps (Eric's 0.05 s minimum), for at most 0.5 s of unload."""
     import dataclasses
 
-    env = GradWalk(7, seed=1, command=COMMAND, air_time_smooth=0.1)
-    env.step(torch.zeros(7, NA, dtype=torch.float64))
+    n = 10
+    env = GradWalk(n, seed=1, command=COMMAND, air_time_smooth=0.1)
+    env.step(torch.zeros(n, NA, dtype=torch.float64))
     half, f64 = env.task.half_weight, torch.float64
     assert 90.0 < half < 105.0                                           # 19.7 kg on two feet
-    force = torch.zeros(7, 2, 3, dtype=f64)
+    assert env.task.hold_steps == 3                                      # Eric's air clock passes 0.05 s at 0.06 s
+    force = torch.zeros(n, 2, 3, dtype=f64)
     force[0, :, 2] = half                                                # both feet carry their half
     force[1, 0, 2] = 2 * half                                            # all on the left, the right foot is up
     force[2, :, 2] = 0.5 * half                                          # each foot carries a quarter (pushing off)
@@ -75,30 +78,47 @@ def test_air_time_stand_in_pays_for_the_weight_taken_off_a_foot():
     force[4, 0, 2] = 2 * half                                            # as robot 1, but asked for 0.1 m/s only
     force[5, 0, 2], force[5, 1, 2] = 1.5 * half, 0.5 * half              # three quarters of the weight on the left
     force[6, 0, 2] = 2 * half                                            # the right foot rests on the floor without
-    contact = torch.tensor([[True, True], [True, False], [True, True], [True, False], [True, False], [True, True],
-                            [True, True]])                               # weight for 0.6 s: standing on one leg
+    #                                                                      weight for 0.6 s: standing on one leg
+    force[7, 0, 2], force[7, 1, 2] = 1.5 * half, 0.5 * half              # rocking: the right foot was loaded a step ago
+    force[8, 0, 2], force[8, 1, 2] = 1.5 * half, 0.5 * half              # leaning on the left foot for over 1 s
+    force[9, 0, 2], force[9, 1, 2] = 1.05 * half, 0.95 * half            # a quiet stance, a little to the left
+    contact = torch.ones(n, 2, dtype=torch.bool)
+    contact[[1, 3, 4], 1] = False
     sig = dataclasses.replace(env.sig, contact_force=force, contact=contact)
     mem = dict(env.mem)
-    mem["air_time"] = torch.tensor([[0, 0], [0, 0.1], [0, 0], [0, 0.6], [0, 0.1], [0, 0], [0, 0]], dtype=f64)
-    mem["unloaded_time"] = torch.tensor([[0, 0], [0, 0.1], [0, 0], [0, 0.6], [0, 0.1], [0, 0], [0, 0.6]], dtype=f64)
-    mem["target"] = torch.tensor([COMMAND] * 4 + [(0.1, 0.0, 0.0)] + [COMMAND] * 2, dtype=f64)
-    z = torch.zeros(7, NA, dtype=f64)
-    terms, new = env.task.terms(sig, mem, z, z, z, torch.zeros(7, dtype=f64), torch.zeros(7, dtype=torch.bool))
-    assert torch.allclose(terms["air_time_smooth"], torch.tensor([0.0, 1.0, 1.0, 0.0, 0.0, 0.5, 0.0], dtype=f64))
+    mem["air_time"] = torch.zeros(n, 2, dtype=f64)
+    mem["air_time"][[1, 3, 4], 1] = torch.tensor([0.1, 0.6, 0.1], dtype=f64)
+    mem["unloaded_time"] = torch.zeros(n, 2, dtype=f64)
+    mem["unloaded_time"][[1, 3, 4, 6, 8, 9], 1] = torch.tensor([0.1, 0.6, 0.1, 0.6, 0.5, 0.6], dtype=f64)
+    history = torch.zeros(n, 2, 3, dtype=f64)                            # the unloads of the steps before, oldest first
+    history[[1, 3, 4, 6], 1] = 1.0
+    history[2], history[[5, 8], 1] = 0.5, 0.5
+    history[7, 1] = torch.tensor([0.5, 0.0, 0.5], dtype=f64)
+    history[9, 1] = 0.05
+    mem["unload_history"] = history
+    mem["target"] = torch.tensor([COMMAND] * 4 + [(0.1, 0.0, 0.0)] + [COMMAND] * 5, dtype=f64)
+    z = torch.zeros(n, NA, dtype=f64)
+    terms, new = env.task.terms(sig, mem, z, z, z, torch.zeros(n, dtype=f64), torch.zeros(n, dtype=torch.bool))
+    paid = torch.tensor([0.0, 1.0, 1.0, 0.0, 0.0, 0.5, 0.0, 0.0, 0.0, 0.05], dtype=f64)
+    assert torch.allclose(terms["air_time_smooth"], paid), terms["air_time_smooth"]
     assert terms["air_time"][1] == 1.0 and terms["air_time"][3] == 0.0   # where Eric's count pays and where it stopped
     assert float(new["unloaded_time"][0].abs().max()) == 0.0             # a loaded foot starts the clock again
     assert float(new["unloaded_time"][6, 1]) == pytest.approx(0.62)      # the resting foot's clock runs on
+    assert float(new["unloaded_time"][8, 1]) == pytest.approx(0.51)      # half unloaded: half a second per second
+    assert float(new["unloaded_time"][9, 1]) == 0.0                      # 95 % of its half: a new unload starts
+    assert torch.allclose(new["unload_history"][7, 1], torch.tensor([0.0, 0.5, 0.5], dtype=f64))
 
 
 def test_air_time_stand_in_gives_a_slope_through_the_plant():
     """With the stand-in, the differentiated reward of a standing robot asked to walk gets a new slope, and autograd
-    through the pH plant agrees with finite differences."""
-    start, K = None, 3
+    through the pH plant agrees with finite differences.  6 steps: an action reaches the feet a step later (the
+    firmware's delay), and the stand-in pays the smallest unload of 3 steps."""
+    start, K = None, 6
     grads = []
     for weight in (0.0, 0.1):
         env = GradWalk(2, seed=1, command=COMMAND, air_time_smooth=weight)
         with torch.no_grad():
-            for _ in range(12):                                          # 0.24 s: settled, the request ramped past 0.2
+            for _ in range(20):         # 0.4 s: settled (one foot keeps a little weight off), the request past 0.2
                 env.between_steps()
                 env.step(torch.zeros(2, NA, dtype=torch.float64))
         start = {k: v.clone() for k, v in env.get_state().items()}
@@ -145,9 +165,11 @@ def test_restarts_draw_new_requests_and_a_fixed_command_stays():
     assert torch.equal(fixed.mem["commands"], torch.tensor([COMMAND] * 3, dtype=torch.float64))
 
 
-def test_window_step_by_step_equals_one_graph_on_the_walk():
+@pytest.mark.parametrize("stand_in", [0.0, 1.0])
+def test_window_step_by_step_equals_one_graph_on_the_walk(stand_in):
     """The learner's window on the walk task, with noise, pushes, changing delays, gain errors and changing
-    requests: backward one control step at a time gives the same action gradients as one graph."""
+    requests: backward one control step at a time gives the same action gradients as one graph.  With air_time's
+    stand-in, the derivative also runs through the memory of the last unloads."""
     from mbrl.grad.train import window, window_one_graph
     from mbrl.mpc.nets import MLP
 
@@ -159,7 +181,7 @@ def test_window_step_by_step_equals_one_graph_on_the_walk():
     policy = MLP(C.OBS_DIM, NA, last_scale=0.5).double()
     out = []
     for fn in (lambda e: window(e, policy, args)["g"], lambda e: window_one_graph(e, policy, args)):
-        env = GradWalk(3, seed=4, **world)
+        env = GradWalk(3, seed=4, air_time_smooth=stand_in, **world)
         env.mem["command_time_left"][0] = 0.03               # robot 0 gets a new request inside the window
         torch.manual_seed(7)
         out.append(fn(env))

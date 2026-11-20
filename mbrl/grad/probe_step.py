@@ -7,8 +7,8 @@ r"""W5b: does air_time's smooth stand-in show the learner a step?  Two checks on
 gait (plausibility): Eric's walk_v9, used here only as a check (it is part of no training), walks --warmup s on the
 differentiable plant with a fixed request; then --seconds s are recorded per foot and control step: the ground force
 over half the weight, Eric's air_time count (air clock between 0.05 and 0.5 s, request above 0.2), the stand-in
-(Full Body rl/walk/task.py STAND_INS: unload x [nearly without weight for under 0.5 s] x [request above 0.2]) and the
-contact.
+(Full Body rl/walk/task.py STAND_INS: the unload kept over the last 3 control steps x [under 0.5 s of unload since
+the foot last carried nearly its half] x [request above 0.2]) and the contact.
 -> agreement numbers and a figure.
 
 lift (the learner's question without the network): robots start in the sprint's home pose with a request of --vx m/s
@@ -38,15 +38,18 @@ from mbrl.grad.walk_env import NA, GradWalk
 
 def per_foot(env: GradWalk) -> dict:
     """This control step, per foot (B,2): unload (0 = carries half the robot or more, 1 = none of it), Eric's count,
-    the stand-in (both unweighted, after the request gate), the contact."""
+    the stand-in (both unweighted, after the request gate; the stand-in is the unload kept over the last 3 steps, 0
+    when the environment does not compute it), the contact, the stand-in's clock (seconds of unload) and Eric's air
+    clock."""
     task, s, mem = env.task, env.sig, env.mem
     target = mem["target"]
     gate = ((torch.linalg.vector_norm(target[:, :2], dim=1) + target[:, 2].abs()) > 0.2).to(env.dtype)[:, None]
-    clock, unloaded = mem["air_time"], mem["unloaded_time"]   # the foot clocks after this step, as the task used them
+    clock, spent = mem["air_time"], mem["unloaded_time"]   # the foot clocks after this step, as the task used them
     low, high = task.p.air_time_range
     unload = (1.0 - s.contact_force[..., 2] / task.half_weight).clamp(0.0, 1.0)
+    held = mem["unload_history"].amin(-1)                   # the last hold_steps unloads, this step's included
     return {"unload": unload, "eric": ((clock > low) & (clock < high)).to(env.dtype) * gate,
-            "stand": unload * (unloaded < high).to(env.dtype) * gate, "contact": s.contact, "clock": unloaded}
+            "stand": held * (spent < high).to(env.dtype) * gate, "contact": s.contact, "clock": spent, "air": clock}
 
 
 # ------------------------------------------------------------------------------------------------------- gait
@@ -168,6 +171,7 @@ def measure(env: GradWalk, start: dict, actions: torch.Tensor, args):
     unload_max = torch.zeros(B, dtype=env.dtype)
     stand_sum, air_steps, both_up, steps_up = (torch.zeros(B, dtype=env.dtype) for _ in range(4))
     tilt_max, clock_max = torch.zeros(B, dtype=env.dtype), torch.zeros(B, dtype=env.dtype)
+    air_max = torch.zeros(B, dtype=env.dtype)           # the longest a foot was off the ground (Eric's air clock)
     loads = []
     with torch.no_grad():
         for k in range(K):
@@ -183,6 +187,7 @@ def measure(env: GradWalk, start: dict, actions: torch.Tensor, args):
             steps_up += live
             tilt_max = torch.where(alive, torch.maximum(tilt_max, env.sig.roll_pitch.abs().max(1).values), tilt_max)
             clock_max = torch.where(alive, torch.maximum(clock_max, f["clock"].max(1).values), clock_max)
+            air_max = torch.where(alive, torch.maximum(air_max, f["air"].max(1).values), air_max)
             loads.append((env.sig.contact_force[..., 2] / env.task.half_weight)[0].tolist())
             alive = alive & ~env.fallen()
         q = env.plant.q
@@ -193,6 +198,8 @@ def measure(env: GradWalk, start: dict, actions: torch.Tensor, args):
                "distance_m": float((q[:, 0] - x0)[alive].mean()) if up else float("nan"),
                "trunk_drop_m": float((z0 - q[:, 2])[alive].mean()) if up else float("nan"),
                "tilt_deg": math.degrees(float(tilt_max.mean())), "longest_unloaded_s": float(clock_max.max()),
+               "longest_in_air_s": float(air_max.max()),
+               "robots_with_a_foot_up_0.1s": int(((air_max >= 0.1 - 1e-9) & alive).sum()),
                "fell": int((~alive).sum())}
     return numbers, loads
 
@@ -225,8 +232,10 @@ def lift(args) -> dict:
                 first = first or numbers
                 print(f"[lift] weight {w:g}  it {it:3d}  objective {objective:+.4f}  weight off a foot "
                       f"{numbers['unload_max']:.2f}  feet in the air {numbers['feet_in_air']:.0%}  both up "
-                      f"{numbers['both_feet_up']:.0%}  trunk +{numbers['distance_m']:.3f} m  drop {numbers['trunk_drop_m']:+.3f} m  "
-                      f"tilt {numbers['tilt_deg']:.1f} deg  fell {numbers['fell']}  ({time.time() - t0:.0f} s)", flush=True)
+                      f"{numbers['both_feet_up']:.0%}  longest up {numbers['longest_in_air_s']:.2f} s "
+                      f"({numbers['robots_with_a_foot_up_0.1s']} robots >= 0.1 s)  trunk +{numbers['distance_m']:.3f} m  "
+                      f"drop {numbers['trunk_drop_m']:+.3f} m  tilt {numbers['tilt_deg']:.1f} deg  fell {numbers['fell']}  "
+                      f"({time.time() - t0:.0f} s)", flush=True)
             if it < args.iterations:                         # the learner's window: objective and its derivative
                 env.set_state({k: v.clone() for k, v in start.items()})
                 out = window(env, OpenLoop(actions.detach()), wargs)
@@ -236,12 +245,14 @@ def lift(args) -> dict:
                 opt.step()
         results[f"{w:g}"] = {"first": first, "last": numbers, "loads_robot0": loads, "seconds": time.time() - t0}
     print("\n[lift] after the optimisation, per weight of the stand-in (0 = Eric's terms only, as in W5):")
-    print("  weight  weight off a foot  feet in air  both up  trunk moved  trunk drop  tilt  longest unloaded  fell")
+    print("  weight  weight off a foot  feet in air  both up  longest up  robots up 0.1 s  trunk moved  trunk drop  "
+          "tilt  seconds of unload  fell")
     for w, r in results.items():
         n = r["last"]
         print(f"  {w:>6}  {n['unload_max']:17.2f}  {n['feet_in_air']:11.0%}  {n['both_feet_up']:7.0%}  "
+              f"{n['longest_in_air_s']:8.2f} s  {n['robots_with_a_foot_up_0.1s']:15d}  "
               f"{n['distance_m']:+9.3f} m  {n['trunk_drop_m']:+8.3f} m  {n['tilt_deg']:4.1f}  "
-              f"{n['longest_unloaded_s']:14.2f} s  {n['fell']:4d}")
+              f"{n['longest_unloaded_s']:15.2f} s  {n['fell']:4d}")
     lift_figure(results, args, vx)
     return {"request_mps": vx, "steps": args.steps, "iterations": args.iterations, "robots": args.robots,
             "results": {w: {k: v for k, v in r.items() if k != "loads_robot0"} for w, r in results.items()}}
