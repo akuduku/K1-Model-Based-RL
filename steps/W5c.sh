@@ -23,7 +23,9 @@
 # Then:   20 Nov 2026, laptop (no tag yet).  lift (4 robots, 0.3 m/s; standing still scores 0.64 in time): clock 2,
 #         40 steps: in time 0.74, 59 % off a foot; 100 steps: 0.78, 80 %; clock 4, 100 steps: 0.88, 94 %, a foot up
 #         0.12 s in 2 of 4 robots, no fall (the kept unload of W5b at 2: 0.57, 86 %, 0.02 s).  laptop (W=4, 30 min):
-#         feet in the air 1.5 % (W5: 1-3 %), the clock's reward 0.037 -> 0.031; no Kaggle run.
+#         feet in the air 1.5 % (W5: 1-3 %), the clock's reward 0.037 -> 0.031; no Kaggle run.  lift with the
+#         learner's 0.4 s view (--steps 20, clock 4, 100 steps): all 4 robots lift the right foot 0.06-0.08 s in its
+#         window, in time 0.86, lean 1.8°: the short view does not pull it back to standing.
 set -euo pipefail
 . "$(dirname "$0")/common.sh"
 NAME=grad-walk-clock-v1

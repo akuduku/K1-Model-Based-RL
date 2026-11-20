@@ -868,6 +868,14 @@ neither breaks nor blows up the derivative.  Not covered by this: repeated steps
   own clock counter).  Tests: both plants give the same 77 inputs while walk_v9 walks; a clock run is evaluated,
   exported and runs in MuJoCo.  `steps/W5c.sh launch` shows the Kaggle run `grad-walk-clock-v1` (W5's settings and
   only `--gait-clock 4`); it starts only with the user's yes.  Open after it: longer windows (W4).
+- **With the learner's own view** (the stepping check with a 0.4 s window and term 2 at its end, as the learner sees
+  it, instead of 0.8 s; weight 4, 100 Adam steps; `outputs/steps/W5c/lift-clock-4-window20/`): the question was
+  whether the short view, with term 2 charging a robot caught mid-step, pulls it back to standing.  It does not: all 4
+  robots lift the right foot for 0.06-0.08 s inside its window while the left foot carries nearly the whole robot,
+  then the weight goes back and the left foot unloads in its window; in time 0.86, the weight fully off a foot, feet
+  in the air 9 % of the window (0.8 s view: 3 %), the trunk 0.10 m forward with 1.8° of lean (0.8 s view: 5.8°), no
+  fall, no hop.  The bar (0.1 s in 2 of 4 robots) is missed by its letter, 0.08 s at most: the short view gives
+  shorter lifts.  So the learner's objective points to stepping; what is missing is training.
 
 ### W6: kick
 - First the derivative through the ball contact (a check like W0).  The ball's 3x3 solve in the Python plant
