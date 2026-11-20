@@ -29,7 +29,7 @@ from ph_k1 import firmware as fwm
 from ph_k1.plant import Ledger
 from rl.kick.contract import yaw_of
 from rl.walk import contract as C
-from rl.walk.task import COUNTS, FLOAT_MEMORY, REWARDS, STAND_INS, WalkParams, WalkTask
+from rl.walk.task import COUNTS, FLOAT_MEMORY, REWARDS, SHAPING, WalkParams, WalkTask
 
 NA = C.NJ
 OBS_NOISE = {"gyro": 0.2, "gravity": 0.05, "joint_pos": 0.01, "joint_vel": 1.5}     # rl/walk/env.py WalkConfig
@@ -58,7 +58,7 @@ class GradWalk(GradEnv):
                  delay_ms=(20.0, 20.0), gain_scale=(1.0, 1.0), encoder_bias: float = 0.0, random_yaw: bool = False,
                  command=None, command_scale: float = 1.0, top_speed: float | None = None,
                  rewards: dict | None = None, params: WalkParams | None = None, observe_target: bool = False,
-                 action_clip: float = 20.0, air_time_smooth: float = 0.0):
+                 action_clip: float = 20.0, air_time_smooth: float = 0.0, gait_clock: float = 0.0):
         self.joint_noise, self.random_yaw, self.observe_target = joint_noise, random_yaw, observe_target
         self.action_clip = action_clip          # rl/walk/env.py WalkConfig.action_clip: stops a runaway policy
         self.obs_noise, self.push_dv, self.push_interval_s = obs_noise or {}, push_dv, push_interval_s
@@ -66,13 +66,16 @@ class GradWalk(GradEnv):
         self._build(robots, seed, device, dtype, C.GAINS, C.SLEW, delay_ms)
         if air_time_smooth > 0:                 # air_time's smooth stand-in, differentiated beside Eric's terms (W5b)
             rewards = {**(REWARDS if rewards is None else rewards), "air_time_smooth": air_time_smooth}
+        self.gait_clock = gait_clock > 0        # the gait clock (W5c): two more inputs and a reward for stepping in time
+        if self.gait_clock:
+            rewards = {**(REWARDS if rewards is None else rewards), "gait_clock": gait_clock}
         self.task = WalkTask(self.model, POLICY_DT, params, rewards)
         self.task.command_scale = command_scale
         if top_speed is not None:
             self.task.top_speed = top_speed
         self.contract = self.task.contract
         self.smooth = tuple(k for k in self.task.rewards if k not in COUNTS)       # the terms with a derivative
-        self.full = tuple(k for k in self.task.rewards if k not in STAND_INS)      # the full reward: Eric's terms
+        self.full = tuple(k for k in self.task.rewards if k not in SHAPING)        # the full reward: Eric's terms
         self.plant.reset(pose=self.contract.home)
         self.fw = fwm.K1Firmware(self.plant, self.fw_cfg)
         self.base_kp, self.base_kd = (g.clone() for g in fwm.gains(self.model, C.GAINS))
@@ -179,10 +182,14 @@ class GradWalk(GradEnv):
         g = self.contract.projected_gravity(quat)
         command = self.mem["target"] if self.observe_target else self.mem["commands"]
         if not noise or not self.obs_noise:
-            return self.contract.observe(self.gyro, g, theta + self.encoder_bias, self.qd, self.actions, command)
-        return self.contract.observe(self._noisy(self.gyro, "gyro"), self._noisy(g, "gravity"),
-                                     self._noisy(theta + self.encoder_bias, "joint_pos"), self._noisy(self.qd, "joint_vel"),
-                                     self.actions, command)
+            obs = self.contract.observe(self.gyro, g, theta + self.encoder_bias, self.qd, self.actions, command)
+        else:
+            obs = self.contract.observe(self._noisy(self.gyro, "gyro"), self._noisy(g, "gravity"),
+                                        self._noisy(theta + self.encoder_bias, "joint_pos"),
+                                        self._noisy(self.qd, "joint_vel"), self.actions, command)
+        if self.gait_clock:                     # the clock's sin and cos after the 75 (0 while standing): 77 inputs
+            obs = torch.cat((obs, self.task.clock(self.mem).to(obs.dtype)), -1)
+        return obs
 
     def _signals(self, prev_qd):
         pl = self.plant

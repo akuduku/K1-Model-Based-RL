@@ -163,8 +163,10 @@ class OpenLoop:
 
 
 def measure(env: GradWalk, start: dict, actions: torch.Tensor, args):
-    """Open-loop actions (K,B,NA) from `start`, no derivative: what the feet and the trunk did.  -> (numbers, loads)."""
+    """Open-loop actions (K,B,NA) from `start`, no derivative: what the feet and the trunk did.
+    -> (numbers, loads of robot 0, traces of all robots: load, contact, clock phase, swing windows, in time)."""
     env.set_state({k: v.clone() for k, v in start.items()})
+    trace = {"load": [], "contact": [], "phase": [], "clock_on": [], "swing": [], "in_time": []}
     B, K = env.B, actions.shape[0]
     alive = torch.ones(B, dtype=torch.bool)
     z0, x0 = env.plant.q[:, 2].clone(), env.plant.q[:, 0].clone()
@@ -176,9 +178,19 @@ def measure(env: GradWalk, start: dict, actions: torch.Tensor, args):
     with torch.no_grad():
         for k in range(K):
             env.between_steps()
+            phase, on = env.mem["gait_phase"].clone(), env.task.clock_on(env.mem)   # the clock this step is paid at
             env.step(actions[k])
             live = alive.to(env.dtype)
             f = per_foot(env)
+            sw = env.task.swing(phase)
+            load = env.sig.contact_force[..., 2] / env.task.half_weight
+            u = f["unload"]
+            trace["load"].append(load.tolist())
+            trace["contact"].append(env.sig.contact.to(torch.int8).tolist())
+            trace["phase"].append(phase.tolist())
+            trace["clock_on"].append(on.to(torch.int8).tolist())
+            trace["swing"].append(sw.tolist())
+            trace["in_time"].append(((sw * u + (1 - sw) * (1 - u)).mean(1) * on.to(env.dtype)).tolist())
             unload_max = torch.where(alive, torch.maximum(unload_max, f["unload"].max(1).values), unload_max)
             stand_sum += f["stand"].sum(1) * live
             off = (~f["contact"]) & alive[:, None]
@@ -200,8 +212,9 @@ def measure(env: GradWalk, start: dict, actions: torch.Tensor, args):
                "tilt_deg": math.degrees(float(tilt_max.mean())), "longest_unloaded_s": float(clock_max.max()),
                "longest_in_air_s": float(air_max.max()),
                "robots_with_a_foot_up_0.1s": int(((air_max >= 0.1 - 1e-9) & alive).sum()),
+               "in_time": float(torch.tensor(trace["in_time"]).mean()),
                "fell": int((~alive).sum())}
-    return numbers, loads
+    return numbers, loads, trace
 
 
 def lift(args) -> dict:
@@ -214,8 +227,9 @@ def lift(args) -> dict:
                             terminal_seconds=args.terminal_seconds, terminal_kinetic=0.0, fall_weight=1.0)
     results = {}
     for w in args.weights:
+        clock = args.term == "clock"
         env = GradWalk(args.robots, seed=args.seed, command=(vx, 0.0, 0.0), joint_noise=args.joint_noise,
-                       air_time_smooth=w)
+                       air_time_smooth=0.0 if clock else w, gait_clock=w if clock else 0.0)
         with torch.no_grad():
             for _ in range(round(args.settle / POLICY_DT)):
                 env.between_steps()
@@ -224,13 +238,13 @@ def lift(args) -> dict:
         gen = torch.Generator().manual_seed(args.seed)
         actions = (args.init_noise * torch.randn(args.steps, env.B, NA, generator=gen, dtype=env.dtype)).requires_grad_(True)
         opt = torch.optim.Adam([actions], lr=args.lr)
-        t0, first, numbers, loads, objective = time.time(), None, None, None, float("nan")
+        t0, first, numbers, loads, trace, objective = time.time(), None, None, None, None, float("nan")
         for it in range(args.iterations + 1):
             if it % args.print_every == 0 or it == args.iterations:
-                numbers, loads = measure(env, start, actions.detach(), args)
+                numbers, loads, trace = measure(env, start, actions.detach(), args)
                 numbers["objective"] = objective                  # of the actions before the last Adam step
                 first = first or numbers
-                print(f"[lift] weight {w:g}  it {it:3d}  objective {objective:+.4f}  weight off a foot "
+                print(f"[lift] {args.term} {w:g}  it {it:3d}  objective {objective:+.4f}  in time {numbers['in_time']:.2f}  weight off a foot "
                       f"{numbers['unload_max']:.2f}  feet in the air {numbers['feet_in_air']:.0%}  both up "
                       f"{numbers['both_feet_up']:.0%}  longest up {numbers['longest_in_air_s']:.2f} s "
                       f"({numbers['robots_with_a_foot_up_0.1s']} robots >= 0.1 s)  trunk +{numbers['distance_m']:.3f} m  "
@@ -243,7 +257,8 @@ def lift(args) -> dict:
                 opt.zero_grad()
                 actions.grad = -out["g"].to(actions.dtype)   # Adam goes down: minus d(objective)/d(action)
                 opt.step()
-        results[f"{w:g}"] = {"first": first, "last": numbers, "loads_robot0": loads, "seconds": time.time() - t0}
+        results[f"{w:g}"] = {"first": first, "last": numbers, "loads_robot0": loads, "seconds": time.time() - t0,
+                             "trace": trace, "actions": actions.detach().tolist()}
     print("\n[lift] after the optimisation, per weight of the stand-in (0 = Eric's terms only, as in W5):")
     print("  weight  weight off a foot  feet in air  both up  longest up  robots up 0.1 s  trunk moved  trunk drop  "
           "tilt  seconds of unload  fell")
@@ -254,7 +269,9 @@ def lift(args) -> dict:
               f"{n['distance_m']:+9.3f} m  {n['trunk_drop_m']:+8.3f} m  {n['tilt_deg']:4.1f}  "
               f"{n['longest_unloaded_s']:15.2f} s  {n['fell']:4d}")
     lift_figure(results, args, vx)
-    return {"request_mps": vx, "steps": args.steps, "iterations": args.iterations, "robots": args.robots,
+    return {"term": args.term, "request_mps": vx, "steps": args.steps, "iterations": args.iterations,
+            "robots": args.robots, "policy_dt": POLICY_DT,
+            "clock": {"period_s": env.task.p.gait_period, "swing_share": env.task.p.gait_swing},
             "results": {w: {k: v for k, v in r.items() if k != "loads_robot0"} for w, r in results.items()}}
 
 
@@ -268,10 +285,16 @@ def lift_figure(results: dict, args, vx: float) -> Path:
     for ax, (w, r) in zip(axes[:, 0], results.items()):
         loads = torch.tensor(r["loads_robot0"])
         t = [(k + 1) * POLICY_DT for k in range(loads.shape[0])]
+        if args.term == "clock":                         # the clock's swing windows of robot 0, foot by foot
+            sw = torch.tensor(r["trace"]["swing"])[:, 0]
+            for j in range(len(t)):
+                for foot, colour in ((0, "tab:blue"), (1, "tab:red")):
+                    if float(sw[j, foot]) > 0.5:
+                        ax.axvspan(t[j] - POLICY_DT / 2, t[j] + POLICY_DT / 2, color=colour, alpha=0.08, lw=0)
         ax.plot(t, loads[:, 0].tolist(), label="left foot", color="tab:blue")
         ax.plot(t, loads[:, 1].tolist(), label="right foot", color="tab:red")
         ax.axhline(0.0, color="0.6", lw=0.8)
-        ax.set_ylabel(f"weight {w}")
+        ax.set_ylabel(f"{args.term} {w}")
         ax.set_ylim(-0.05, 2.2)
     axes[0, 0].legend(loc="upper right", fontsize=8)
     axes[-1, 0].set_xlabel("time in the window [s]   (ground force / half the robot's weight; 0 = the foot is up)")
@@ -297,7 +320,9 @@ def main():
     ap.add_argument("--policy", default="walk_v9", help="gait: the walk that makes the robot step (a check only)")
     ap.add_argument("--warmup", type=float, default=2.0, help="gait: seconds of walking before the record")
     ap.add_argument("--seconds", type=float, default=5.0, help="gait: seconds recorded")
-    ap.add_argument("--weights", type=float, nargs="+", default=[0.0, 0.1], help="lift: weights of the stand-in")
+    ap.add_argument("--weights", type=float, nargs="+", default=[0.0, 0.1], help="lift: weights of the term")
+    ap.add_argument("--term", choices=("stand-in", "clock"), default="stand-in",
+                    help="lift: air_time's stand-in (W5b) or the gait clock's reward (W5c; the optimiser knows the time)")
     ap.add_argument("--steps", type=int, default=40, help="lift: control steps optimised (40 = 0.8 s)")
     ap.add_argument("--settle", type=float, default=0.2, help="lift: seconds of zero actions first")
     ap.add_argument("--iterations", type=int, default=30, help="lift: Adam steps")
