@@ -9,7 +9,7 @@
 #         steps/W5b.sh laptop                       30 min of walking from scratch with the stand-in (16 robots): a smoke
 #                                                   run to compare with W5's (not a result)
 #         steps/W5b.sh launch [--yes]               show the Kaggle run grad-walk-v2 (T4, 6 h, seed 1: W5's settings and
-#                                                   only --air-time-smooth W); --yes starts it.  W=0.5 steps/W5b.sh launch
+#                                                   only --air-time-smooth W, W=1.0 by default); --yes starts it
 #         steps/W5b.sh fetch | score                download it when it has ended | score it per command (about 30 min)
 # Needs:  for launch: both repositories committed and pushed to GitHub, GPU quota
 # Why:    W5 (grad-walk-v1) stood and did not step.  Eric's air_time is the only term that pays for lifting a foot; it
@@ -18,12 +18,16 @@
 #         clamped to [0, 1]; paid while the foot has been nearly without weight (under a quarter of the robot) for less
 #         than 0.5 s, and only for requests above 0.2 (Eric's limit and gate).  train.py --air-time-smooth W adds it with
 #         weight W to what is differentiated; the logged full reward and the scoring stay Eric's.  All else as in W5.
-# Then:   (filled in when the step is finished)
+# Then:   20 Nov 2026, laptop (no tag yet).  gait: the stand-in is 1.00 where Eric's count pays, 0.10 on the ground
+#         (walk_v9 at 0.5 m/s, correlation 0.75).  lift (4 robots, 0.3 m/s, 40 Adam steps): weight off a foot 19 %
+#         without the stand-in, 19 % at 0.1, 47 % at 0.5, 79 % at 1.0 (100 steps: 96 %, a foot up for 0.1 s); feet in
+#         the air 0 %; collected first by rocking between the feet about 12 times a second.  laptop (W=1.0, 30 min):
+#         as W5's smoke run (feet in the air 0-4 %, the stand-in's reward flat).  Kaggle: open, the user's choice.
 set -euo pipefail
 . "$(dirname "$0")/common.sh"
 NAME=grad-walk-v2
 SLUG=mbrl-k1-grad-walk-v2
-W=${W:-0.1}
+W=${W:-1.0}
 
 case "${1:-}" in
     check)

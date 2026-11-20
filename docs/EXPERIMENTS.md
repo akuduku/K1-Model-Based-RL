@@ -33,8 +33,12 @@ when a package is finished.
   and gain errors 93 % fell over the six scoring commands (78 % even when asked to stand).  Quiet, and in MuJoCo, it
   stands but does not move.  Cause, examined: Eric's `air_time`, the only term that pays for lifting a foot, has no
   derivative and reached the learner in no way.  Numbers: W5.
-- **Next:** W5b, a smooth stand-in for `air_time` (examined on the laptop, see W5b).  W4 (speed) after it.  W1's
-  standing seeds 2 and 3 wait until the end (only Kaggle time, no code).
+- **W5b (20 Nov, laptop):** a smooth stand-in for `air_time` (`--air-time-smooth`, the weight a foot has taken off
+  the ground) gives the learner the missing slope: following it, weight comes off a foot.  Not enough on its own:
+  where it is strong enough to matter it is first collected by rocking between the feet, and a 30 min learner run
+  did not change.  Numbers: W5b.
+- **Next: the user decides** (W5b, "Result"): a Kaggle run at weight 1.0, or first stop paying for brief unloading,
+  or a gait clock.  W4 (speed) after it.  W1's standing seeds 2 and 3 wait until the end (only Kaggle time, no code).
 - The planner (`mbrl/mpc`, packages 3-5 below) and PPO on pH are **comparison rows** now, not the thesis method.
 - Commands: tests `scripts/test_all.sh`; Kaggle runs are started by the user (`kaggle/run.sh`, commit and push
   first); Python: `~/Dokumente/Robotics/venv/bin/python`; on the laptop one gradient job at a time (7 GB of memory)
@@ -720,6 +724,54 @@ neither breaks nor blows up the derivative.  Not covered by this: repeated steps
     0.6-1.3, delays 10-70 ms, encoder bias), and the walk reward pays mostly for tracking (the tracking terms are the
     largest part of the reward at the end; `terminated` costs 0.013 per robot and step).
 - Other rows to compare with later: PPO on pH, the planner.
+
+### W5b: a smooth stand-in for `air_time`  **Examined 20 Nov on the laptop: it gives the slope, not yet steps.**  Repeat: `steps/W5b.sh check | gait | lift | laptop | launch | fetch | score`
+- **Why:** W5 took no steps.  In Eric's reward, `air_time` (+0.1) is the only term that pays for lifting a foot.  It
+  counts yes/no events (a foot's air clock between 0.05 and 0.5 s), so its derivative is zero, and in W5 it reached
+  the learner in no way: left out of the window (`COUNTS`), not in V's targets (`--value-reward smooth`), and not
+  expressible by the learned term 2 (14 state costs, no foot signals).  Every other foot term is a penalty, so in
+  the learner's eyes lifting a foot only costs.
+- **What** (the user agreed on 19 Nov to change the reward for the learner as long as it keeps Eric's idea):
+  `Full Body rl/walk/task.py`, optional term `air_time_smooth` (`STAND_INS`, off by default).  Per foot
+  `unload = clamp(1 - ground force / half the weight, 0, 1)`; the ground force comes from the plant's contact spring,
+  so it has a derivative.  Paid while the foot has been nearly without weight (under a quarter of the robot) for less
+  than 0.5 s, and only for requests above 0.2: Eric's limit and gate.  The limit runs on a clock of its own because
+  Eric's air clock stops while a foot touches, and a foot resting on the floor without weight would pay for ever
+  (standing on one leg).  `train.py --air-time-smooth W` adds it with weight W to what is differentiated; the logged
+  full reward and the scoring stay Eric's.  With W = 0 the trainer is bit-identical to W5 (test with the numbers of
+  `7b0e185`).  Not the foot height: it is held at 0 while the foot is down, so no slope there.  Not a softened clock:
+  it would pay only after 0.05 s in the air, so a standing robot would see no slope either.
+- **On a real gait** (`steps/W5b.sh gait`; Eric's walk_v9 as a check only, 0.5 m/s on the pH plant, 4 robots, 5 s;
+  it walks 0.49 m/s, feet in the air 36 %): the stand-in is 1.00 wherever Eric's count pays and 0.10 on average on
+  the ground; correlation 0.75; of its total, 63 % comes where Eric's count pays, 21 % in the first 0.05 s in the
+  air, 16 % while the weight comes off before a lift.  Figure `outputs/steps/W5b/air_time_on_walk_v9.png`.
+- **The learner's own derivative from standing** (`steps/W5b.sh lift`: 4 robots asked for 0.3 m/s; their next
+  0.8 s of actions optimised with Adam through `train.window`; figures and numbers in `outputs/steps/W5b/`):
+
+  | Stand-in weight | Adam steps | Weight off a foot | Feet in the air | Trunk moved | Tilt | Falls |
+  |---|---|---|---|---|---|---|
+  | 0 (Eric's terms, as W5) | 40 | 19 % | 0 % | 0.14 m | 12° | 0 |
+  | 0.1 (Eric's weight) | 40 | 19 % | 0 % | 0.15 m | 12° | 0 |
+  | 0.5 | 40 | 47 % | 0 % | 0.14 m | 12° | 0 |
+  | 1.0 | 40 | 79 % | 0 % | 0.15 m | 13° | 0 |
+  | 1.0 | 100 | 96 % | 1 % (up to 0.10 s) | 0.18 m | 6° | 0 |
+
+  Without the stand-in the optimiser leans forward for speed and both feet stay loaded: W5 in miniature.  The
+  stand-in takes weight off a foot in proportion to its weight, with no hop, fall or crouch.  But at 0.5 and 1.0 it
+  first collects it by rocking the weight from foot to foot about 12 times a second (each foot half unloaded for
+  20-40 ms), exactly what Eric's 0.05 s lower bound refuses to pay for.  With 100 steps a slower rhythm appears in
+  the second half of the window (a weight shift every 0.2-0.25 s, less lean) and a foot leaves the ground briefly.
+- **The learner, 30 min on the laptop with weight 1.0** (`steps/W5b.sh laptop`, 16 robots, as W5's smoke run): no
+  difference.  Feet in the air 0-4 % (W5: 1-3 %), speed error about the requested speed, 0-31 % of robot-windows
+  fell, final evaluation 92 % falls and 3.6 s up.  The stand-in's reward stayed flat at 0.003 per robot and step:
+  no more weight came off the feet.
+- **Result:** the missing derivative was a real gap, and the stand-in closes it: following it, weight comes off a
+  foot.  It is not enough on its own.  Where it is strong enough to matter, the cheapest way to collect it is
+  rocking, and the learner did not take it up in 30 min.  No Kaggle run yet; the next step is the user's choice:
+  (a) run it anyway at weight 1.0 (`W=1.0 steps/W5b.sh launch`); (b) first stop paying for brief unloading (a smooth
+  version of Eric's 0.05 s minimum) and check with `lift` again; (c) a gait clock (the strongest signal, but a new
+  reward and a new input to the firmware's 75).  Separately, W5 did not even stand under the walk world's
+  disturbances (78 % falls when asked to stand), a second problem that steps alone may not fix.
 
 ### W6: kick
 - First the derivative through the ball contact (a check like W0).  The ball's 3x3 solve in the Python plant
