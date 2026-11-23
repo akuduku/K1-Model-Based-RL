@@ -70,20 +70,32 @@ plant, in MuJoCo and on the robot, and at what cost (environment steps, model st
 valid result.  (Checked against Plaat, *Deep Reinforcement Learning* (2022), ch. 5 on 16 Nov 2026: the protocol
 rules 4-6 below come from there.)
 
-Rules (set on 15 Nov 2026):
+Rules (set on 15 Nov 2026; rules 1, 2, 3, 4 and 6 changed on 23 Nov 2026, reason: see Journal/DECISIONS.md):
 
-1. The model-based arm learns **from scratch**. No policy, motion or demonstration from Eric Plass's k1_kick or walk
-   goes into it, and no PPO stage. From his work only the **task and the rewards** are used.
+1. The model-based arm starts from a **random network only at its first stage**; every later skill starts from the
+   method's **own** earlier checkpoints (rule 2).  Nothing trained by the team enters it: no policy, motion,
+   demonstration or PPO stage from Eric Plass's or the team's work.  From the team's work only the **task** is used:
+   rewards, commands and the settings of the world.  *(Changed on 23 Nov 2026, reason: see Journal/DECISIONS.md.
+   Before: "learns from scratch ... From his work only the task and the rewards are used.")*
 2. A skill that needs an earlier skill (the kick needs standing and walking) starts from that arm's **own** earlier
-   stage. Nothing crosses between the arms.
-3. Both arms: the same plant, task, rewards, randomisation (noise, pushes, delays, gain errors), the same final
-   network (512-256-128 ELU, the firmware's `.bin`), the same evaluation script.
+   stage.  Nothing crosses between the arms.  If the earlier stage has another contract (stand: 72 inputs and its own
+   home pose and gains; walk: 75), that stage is learned again in the new contract as a stand-only stage of the new
+   task, and its steps are counted.  *(Changed on 23 Nov 2026, reason: see Journal/DECISIONS.md.)*
+3. Both arms: the same plant, task, rewards, the same final network (512-256-128 ELU, the firmware's `.bin`), the
+   same evaluation script, and the **same scoring world** (noise, pushes, delays, gain errors).  During training
+   both arms may use the same curriculum over the randomisation (gentler first, ending at the scoring world); the
+   curriculum and its steps are reported.  *(Changed on 23 Nov 2026, reason: see Journal/DECISIONS.md.  Before:
+   "the same ... randomisation".)*
 4. Cost is reported as: **environment steps** (executed; what a robot did), **model steps** (planning included),
-   and **hours** on the named GPU.  The book's warning (5.3.3): fewer environment steps do not mean less time.
+   and **hours** on the named GPU.  The book's warning (5.3.3): fewer environment steps do not mean less time.  The
+   cost includes the steps of earlier stages and of any curriculum.  *(Changed on 23 Nov 2026, reason: see
+   Journal/DECISIONS.md.)*
 5. Quality is scored on an environment that is **not** the planning model: MuJoCo first (`rl/stand/eval_mujoco.py`),
    the real robot where possible; the pH numbers stand next to it.
 6. A row of the thesis table needs **3 seeds** per arm (results depend on the seed, book 5.3.1).  The checkpoint
-   that counts is the one with the best evaluation inside the run, by the same rule for both arms.
+   that counts is the one with the best evaluation inside the run, by the same rule for both arms.  In-run
+   evaluations use at least 128 robots and, for walking, 20 s episodes, so that about 1 % falls per episode can be
+   resolved.  *(Changed on 23 Nov 2026, reason: see Journal/DECISIONS.md.)*
 7. Correct before fast. A result that only holds with a trick is reported as such or not at all.
 
 Eric's policies are used for one thing only: to check an environment (his MuJoCo-trained kick runs in `rl/kick`

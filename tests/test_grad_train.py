@@ -175,6 +175,29 @@ def test_a_clock_run_is_evaluated_exported_and_runs_in_mujoco(monkeypatch, tmp_p
     assert walker.clock_steps == 15 - 6 and np.hypot(twist[0], twist[1]) > 0.2   # on from the 7th step (0.21 m/s)
 
 
+def test_stand_only_walk_requests_nothing_and_evaluates_the_stand(monkeypatch, tmp_path, capsys):
+    """--stand-only: the walk task with every request (0, 0, 0) and no curriculum; the in-run evaluation is the stand
+    request alone (20 s episodes in the walk world)."""
+    run_main(monkeypatch, tmp_path, "--task", "walk", "--robots", "3", "--steps", "3", "--iterations", "1",
+             "--eval-robots", "2", "--stand-only", "--run-name", "so")
+    cfg = json.loads((tmp_path / "so" / "config.json").read_text())
+    assert cfg["stand_only"] and cfg["command_scale"] == 0.0 and cfg["command_scale_max"] == 0.0
+    r = json.loads((tmp_path / "so" / "metrics.jsonl").read_text().splitlines()[0])
+    assert r["Walk/requested_speed"] == 0.0 and r["Curriculum/command_scale"] == 0.0
+    assert 0.0 <= r["Walk/tilt_deg"] < 90.0 and r["Cost/hours"] > 0.0          # tilt and wall-clock hours are logged
+    out = capsys.readouterr().out
+    assert "[eval] failed" not in out
+    done = [line for line in out.splitlines() if "done after iteration 1" in line]
+    assert done and " fell " in done[0]
+    evaluator = []
+    from rl.walk import evaluate as E
+
+    monkeypatch.setattr(E.WalkEval, "__call__", lambda self, policy, it=0: evaluator.append(self) or {})
+    run_main(monkeypatch, tmp_path, "--task", "walk", "--robots", "3", "--steps", "2", "--iterations", "1",
+             "--eval-robots", "2", "--stand-only", "--run-name", "so2")
+    assert evaluator[0].commands == ((0.0, 0.0, 0.0),) and evaluator[0].seconds == 20.0
+
+
 def test_standing_is_unchanged_by_walking(monkeypatch, tmp_path):
     """The numbers of 2 updates of standing (4 robots, window 4, seed 3, learned term-2 weights), recorded with the
     trainer as it was before walking was added (19 Nov 2026, commit e91df64)."""

@@ -78,7 +78,7 @@ def window(env: GradStand, policy: MLP, args, alive_age: torch.Tensor | None = N
     returns the critic's inputs and the TD(lambda) targets of V (full reward, falls charged as in the objective)."""
     B, K, dev = env.B, args.steps, env.device
     crits, full_rewards = [], []
-    walk_stats = {"speed_error": [], "requested_speed": [], "feet_air": [], "slip_speed": []}   # walking only
+    walk_stats = {"speed_error": [], "requested_speed": [], "feet_air": [], "slip_speed": [], "tilt_deg": []}  # walking
     # the Hamiltonian's flows (what the battery supplies, what turns into heat where) and every reward term: sums
     # over the live robots and control steps, as tensors (no wait for the GPU in every step)
     flows, terms_sum, live_steps = {}, {}, 0.0
@@ -118,6 +118,8 @@ def window(env: GradStand, policy: MLP, args, alive_age: torch.Tensor | None = N
                                ("feet_air", "feet_air"), ("slip_speed", "slip_speed")):
                     if info.get(key) is not None:
                         walk_stats[k].append(float((info[key] * live).sum() / live.sum().clamp_min(1.0)))
+                tilt = torch.rad2deg(env.sig.roll_pitch.abs().amax(-1))      # the larger of |roll|, |pitch| [deg]
+                walk_stats["tilt_deg"].append(float((tilt * live).sum() / live.sum().clamp_min(1.0)))
             for key in ("supplied_W", "copper_W", "gearbox_W", "contact_W", "stops_W"):
                 if info.get(key) is not None:
                     flows[key] = flows.get(key, 0.0) + (info[key] * live).sum()
@@ -345,6 +347,9 @@ def main():
                          "foot has taken off the ground and kept off for 3 control steps), differentiated beside Eric's "
                          "terms (W5b); 0 = off, as in W5")
     ap.add_argument("--quiet", action="store_true", help="no sensor noise, no pushes, 20 ms delay")
+    ap.add_argument("--stand-only", action="store_true",
+                    help="walk: every request (0, 0, 0), no curriculum; the in-run evaluation is the stand request alone, "
+                         "20 s episodes in the walk world (falls per episode), and the video stands")
     ap.add_argument("--iterations", type=int, default=1_000_000)
     ap.add_argument("--minutes", type=float, default=0.0)
     ap.add_argument("--hours", type=float, default=0.0)
@@ -367,6 +372,10 @@ def main():
     ap.add_argument("--wandb-entity", default=os.environ.get("WANDB_ENTITY", "karl-jahnel-universit-t-leipzig"))
     args = ap.parse_args()
     walk = args.task == "walk"
+    if args.stand_only:     # stand in the walk contract and world: no requests, so no curriculum either
+        if not walk:
+            ap.error("--stand-only needs --task walk")
+        args.command_scale, args.command_scale_max = 0.0, 0.0
     if args.term2 is None:
         args.term2 = "weights" if walk else "fixed"
     if args.episode_s is None:
@@ -455,7 +464,8 @@ def main():
         from rl.walk.evaluate import WalkEval
         evaluate = WalkEval(WalkConfig(num_envs=args.eval_robots, device=args.eval_device, dtype="float32", seed=args.seed,
                                        gait_clock=args.gait_clock > 0),
-                            args.eval_robots, device=args.eval_device)
+                            args.eval_robots, device=args.eval_device,
+                            **({"seconds": 20.0, "commands": ((0.0, 0.0, 0.0),)} if args.stand_only else {}))
     elif args.eval_robots > 0:
         from rl.stand.env import StandConfig
         from rl.stand.evaluate import StandEval
@@ -465,7 +475,8 @@ def main():
     if not args.no_wandb:
         import wandb
         run = wandb.init(project=args.wandb_project, entity=args.wandb_entity, name=args.run_name,
-                         config={"method": "gradients through the pH model", **vars(args)})
+                         config={"method": "gradients through the pH model", **vars(args),
+                                 "gpu": torch.cuda.get_device_name(0) if torch.cuda.is_available() else "none"})
     print(f"[grad] term 2 at the window's end: {dict(fixed='fixed goal state', weights='learned weights (W3)', value='learned value network V (W3)')[args.term2]}",
           flush=True)
     if walk and args.gait_clock > 0:
@@ -511,7 +522,8 @@ def main():
         from rl.walk.env import WalkConfig
         from rl.walk.video import WalkVideo
         video = WalkVideo(WalkConfig(num_envs=1, device="cpu", dtype="float32", seed=args.seed, gait_clock=args.gait_clock > 0),
-                          run_dir / "videos")
+                          run_dir / "videos",
+                          **({"schedule": ((0.0, (0.0, 0.0, 0.0), "stand"),)} if args.stand_only else {}))
 
     def make_media(it: int, w: dict) -> dict:
         """With every evaluation: the derivative through the pH model in this update's window (figures.py), and with
@@ -640,6 +652,7 @@ def main():
                     walk_row = {"Curriculum/command_scale": curriculum["scale"]}
                 now = time.time()
                 row = {"iteration": iteration, "Cost/executed_steps": env_steps, "Cost/seconds": now - t_it,
+                       "Cost/hours": (now - t0) / 3600.0,
                        "Learn/fit_loss": float(loss.detach()), "Learn/delta": delta, **{f"Grad/{k}": v for k, v in w["stats"].items()},
                        **value_row, **walk_row, **learn_row, **episode_row,
                        **{f"Gradient/{k}": v for k, v in w["gradient"].items()},
