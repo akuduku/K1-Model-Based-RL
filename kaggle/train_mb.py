@@ -94,6 +94,7 @@ GRAD_STEPS = 20                           # grad-stand/-walk: control steps per 
 GRAD_DEVICE = "cuda"                      # grad-stand/-walk: where the Python pH plant runs
 GRAD_BENCH_ROBOTS = "64,256,1024"         # grad-bench: robots per row
 GRAD_DTYPE = "float32"                    # grad-stand/-walk
+GRAD_SEQUENCE = False                     # grad-walk: Step 08's short runs, one core each (mbrl.grad.sequence)
 MB_WANDB_PROJECT = "Akos pH MB"
 RESUME = ""                               # W&B run (name or id) in WANDB_PROJECT to continue from; "" = fresh
 SESSION_HOURS = 11.0                      # our own cap, 1 h under Kaggle's 12 h (kaggle/run.sh pushes with the same
@@ -312,6 +313,11 @@ def main():
         # 64 robots 24 and 256 robots 38 robot-control-steps per second)
         go([py, "-u", "-m", "mbrl.grad.bench", "--devices", "cuda", "--robots", *str(GRAD_BENCH_ROBOTS).split(","),
             "--dtypes", "float32", "--steps", 20, "--trace"], "benchmark (GPU)")
+    elif TASK == "grad-walk" and GRAD_SEQUENCE:
+        # Step 08: short walking runs, one physical core each, a summary after every run (mbrl/grad/sequence.py)
+        go([py, "-u", "-m", "mbrl.grad.sequence", "--minutes", f"{max(budget, 1):.1f}", "--out", WORK / "step08",
+            "--log-root", WORK / "runs", "--wandb-project", MB_WANDB_PROJECT, "--wandb-entity", WANDB_ENTITY,
+            *TRAIN_ARGS.split()], "sequence")
     elif TASK in ("grad-stand", "grad-walk"):
         # the professor's formula: standing (or walking, W5) from scratch with derivatives of the cost through the
         # pH model; walking is evaluated on six fixed commands, 64 robots each, with a video and the Hamiltonian
